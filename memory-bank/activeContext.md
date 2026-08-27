@@ -2,11 +2,25 @@
 
 ## 当前工作焦点
 
-**M2 loop 重构已全部完成（Step A `43b31b2` + Step B `654a4db`）**，主循环/
-流处理/工具执行三段拆分 + ToolGuard + 自动重试 + 新 Callback 事件全部落地，
-`-race -count=2` 全绿。下一步进入 **M3：Anthropic 适配器**。
+**根包门面（facade）已落地（commit 5f6e6ca）**：用户反馈 loop.New 组装语义
+不清晰、想要单一 Config 入口。现公开入口 = `agentcore.NewAgent(Config)`，
+子包架构不变（门面纯语法糖，`Agent = loop.BaseAgent` 别名零包装）。
+M2 全部完成；下一步 **M3：Anthropic 适配器**。
 
 ## 近期变更
+
+- 2026-08-28：**根包门面完成（commit 5f6e6ca）**：
+  - agentcore.go（根包）：`Config`（平铺全可选：APIKey/BaseURL/Model 派生
+    openai provider；Tools nil=默认九件套；Mode/AutoApprove/MaxTokens/
+    RetryDelays/CustomRules；Guard/Store/Title 挂钩）+ `NewAgent(cfg)`。
+  - aliases.go：类型别名全量再导出（Agent/Callback/CallbackAdapter/
+    ToolGuard/GuardedCall/Store/Provider/ToolRegistry/Tool、ModeAct/
+    ModePlan、ErrAbortRun、DefaultRetryDelays）——使用方只 import 根包
+    即可实现全部钩子接口。
+  - agentcore_test.go：门面端到端（scripted provider → attempt_completion
+    → 事件回调）、默认注册表、凭据校验、自定义注册表注入。
+  - 动机：用户反馈 loop.New 组装语义不清晰、要单一 config 参数；
+    评估三方案（根包门面 / loop 改名 agent / 单包合并）后选定门面。
 
 - 2026-08-28：**M2 Step B 完成（commit 654a4db）**：
   - provider/errors.go（新）：`HTTPError{Status, Message, RetryAfter, Err}` +
