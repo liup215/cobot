@@ -9,6 +9,8 @@
 - [x] go mod init（go 1.25）+ MIT LICENSE + .gitignore/.gitattributes
 - [x] 模块改名 agentcore → cobot（commit 726cdae）+ 改名清扫（README/
       包注释/错误前缀/系统提示词身份 `Config.AgentName`，2026-08-28）
+- [x] 清扫收尾：误入库的 `.maestro-mcp.json`（会话级 MCP 配置）出库并
+      加入 .gitignore；仓库不再跟踪任何会话本地文件
 
 ## What's Left to Build
 

@@ -11,6 +11,12 @@ M2 全部完成；下一步 **M3：Anthropic 适配器**。
 
 ## 近期变更
 
+- 2026-08-28：**清扫收尾：会话本地配置出库**——commit dc67232 误将
+  `.maestro-mcp.json`（Maestro 会话级 MCP 配置，含本机 URL 与
+  role/task_id，每次会话都会漂移）提交进仓库。已 `git rm --cached`
+  出库（磁盘保留供本会话连接用）并加入 .gitignore；`git ls-files`
+  已无任何会话本地文件。
+
 - 2026-08-28：**agentcore → cobot 改名清扫**（commit 726cdae 改名 + 本次
   清扫提交）：
   - README：标题、模块路径 `github.com/liup215/cobot`、状态行
@@ -58,6 +64,9 @@ M2 全部完成；下一步 **M3：Anthropic 适配器**。
 - 2026-08-28：M1 完成（types/provider/tools，commits 477b224、da55106）。
 
 **重要经验**：
+- 会话级配置（`.maestro-mcp.json` 等 worktree 注入文件）绝不入库：
+  提交前必须扫一眼 `git status`/`git add -A` 暂存清单，确认没有混入
+  非任务文件；这类文件一律 .gitignore。
 - 从 gline 迁移文件一律用 `cp` + 字节级 `sed`（包名、import、前缀），
   禁止 write 重写迁移源文件——不可见字符问题反复出现。
 - **bash heredoc 追加大段 Go 代码不可靠**（长内容会被静默截断），新测试
