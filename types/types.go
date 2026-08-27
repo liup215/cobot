@@ -39,6 +39,9 @@ const (
 	ToolSearchFiles ToolName = "search_files"
 	// ToolListFiles lists files and directories.
 	ToolListFiles ToolName = "list_files"
+	// ToolListCodeDefinitionNames lists code definitions (functions, classes)
+	// in a directory (read-only structure overview).
+	ToolListCodeDefinitionNames ToolName = "list_code_definition_names"
 	// ToolAttemptCompletion is the terminal tool that ends a run.
 	ToolAttemptCompletion ToolName = "attempt_completion"
 	// ToolAskFollowupQuestion asks the user a clarifying question (does NOT end the run).

@@ -7,6 +7,11 @@
 - [x] Memory Bank 初始化（projectbrief/productContext/activeContext/systemPatterns/techContext/progress）
 - [x] 仓库推送：github.com/liup215/agentcore（public，main，origin 已配置；gh 账号 liup215）
 - [x] go mod init（go 1.25）+ MIT LICENSE + .gitignore/.gitattributes
+- [x] 提示词↔工具集守卫测试（2026-08-28）：loop/prompt_guard_test.go 断言
+      系统提示词中出现的每个工具名都在默认 Registry 中（双模式）、AVAILABLE
+      TOOLS 段仅宣传当前模式允许的工具；prompts/system_test.go 钉死静态工具
+      目录（GetToolDescriptions 及 plan/act 变体）与 Registry 三集合一致。
+      起因：CAPABILITIES 段宣传 list_code_definition_names 但未注册。
 
 ## What's Left to Build
 
@@ -48,9 +53,12 @@
 - [ ] 验收：httptest 假 SSE 全分支测试
 
 ### M4 compaction 与工具集
+- [x] 工具集定稿之一：list_code_definition_names **保留并注册**进默认 Registry
+      （plan/act 双模式，CategoryCode；类型枚举 ToolListCodeDefinitionNames 同步；
+      新增工具单测 + 提示词↔Registry 守卫测试，见 loop/prompt_guard_test.go）
 - [ ] compact.Strategy 接口 + Trim（移植）+ Summarize（新写，K=6 轮）
 - [ ] 默认组合：Summarize 失败回退 Trim
-- [ ] 工具行为定稿（截断/超时/大文件策略；list_code_definition_names 去留）
+- [ ] 工具行为定稿（截断/超时/大文件策略）
 
 ### M5 文档与发布
 - [ ] examples：basic / streaming / custom-tool / guard（均可离线 go run）
@@ -87,3 +95,5 @@
 | 2026-08-28 | a.abort 改 atomic.Bool（修 gline race）；mistakes 清零时机改"工具成功后"（修 FR-L2 死循环） | 内存安全 + 需求 FR-L2；均有测试钉住，零其他语义变化 |
 | 2026-08-28 | 重试只覆盖同步建连失败；流中错误走纠错环 | Step B 设计定稿；流中重试会造成重复副作用 |
 | 2026-08-28 | OnToolCallUpdate 仅同步执行分支发 | 预派发复用时工具已完成，发 running 会误导 |
+| 2026-08-28 | list_code_definition_names 定稿：注册进默认 Registry（plan/act、CategoryCode、无需确认）而非删除提示词 | 工具已完整实现（含 30s 列表缓存）、只读、可安全预派发；提示词 CAPABILITIES 段本就推荐该工作流（environment_details → 定义概览 → read_file → 编辑） |
+| 2026-08-28 | 提示词与工具集的一致性用测试钉死（prose 提及 ⊆ Registry；AVAILABLE TOOLS ⊆ 当前模式；静态目录 = Registry 三集合） | 提示词是自由文本，无结构约束；只有测试能防再次漂移 |

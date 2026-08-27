@@ -73,7 +73,7 @@ func TestNewAgentEndToEnd(t *testing.T) {
 	}
 }
 
-// Omitted Tools defaults to the built-in registry (nine tools registered).
+// Omitted Tools defaults to the built-in registry (ten tools registered).
 func TestNewAgentDefaultRegistry(t *testing.T) {
 	agent, err := cobot.NewAgent(cobot.Config{
 		Provider: provider.NewScriptedProvider(provider.TurnScript{Content: "hi"}),
@@ -84,8 +84,11 @@ func TestNewAgentDefaultRegistry(t *testing.T) {
 	if _, err := agent.GetToolRegistry().Get("attempt_completion"); err != nil {
 		t.Errorf("attempt_completion missing from default registry: %v", err)
 	}
-	if n := agent.GetToolRegistry().Count(); n < 9 {
-		t.Errorf("default registry has %d tools, want >= 9", n)
+	if _, err := agent.GetToolRegistry().Get("list_code_definition_names"); err != nil {
+		t.Errorf("list_code_definition_names missing from default registry: %v", err)
+	}
+	if n := agent.GetToolRegistry().Count(); n < 10 {
+		t.Errorf("default registry has %d tools, want >= 10", n)
 	}
 }
 

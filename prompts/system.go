@@ -248,7 +248,10 @@ func buildToolSection(tools []ToolDescription) string {
 	return builder.String()
 }
 
-// GetToolDescriptions returns descriptions for all built-in tools
+// GetToolDescriptions returns descriptions for all built-in tools.
+// This is the static mirror of tools.InitDefaultRegistry(); the prompt-guard
+// test asserts the two sets stay identical, so a tool added to one must be
+// added to the other.
 func GetToolDescriptions() []ToolDescription {
 	return []ToolDescription{
 		{
@@ -297,46 +300,49 @@ func GetToolDescriptions() []ToolDescription {
 			InputSchema: `{"type":"object","properties":{"result":{"type":"string","description":"Summary of what was accomplished"},"command":{"type":"string","description":"Command to showcase the result"}} ,"required":["result"] }`,
 		},
 		{
-			Name:        "use_subagents",
-			Description: "Run up to four focused in-process subagents in parallel. Each subagent gets its own prompt and returns a comprehensive research result. Use this for broad exploration when reading many files would consume the main agent's context window. You do not need to launch multiple subagents every time; using one subagent is valid when it avoids unnecessary context usage for light discovery work.",
-			InputSchema: `{"type":"object","properties":{"prompt_1":{"type":"string","description":"First subagent prompt."},"prompt_2":{"type":"string","description":"Optional second subagent prompt."},"prompt_3":{"type":"string","description":"Optional third subagent prompt."},"prompt_4":{"type":"string","description":"Optional fourth subagent prompt."}} ,"required":["prompt_1"] }`,
-		},
-		{
-			Name:        "web_fetch",
-			Description: "Fetch the content of a web page and return it as Markdown. Use this to read documentation, articles, or any publicly accessible web page. The content is automatically cleaned (ads, navbars removed) and converted to Markdown. Only http/https URLs are allowed.",
-			InputSchema: `{"type":"object","properties":{"url":{"type":"string","description":"The URL of the web page to fetch"}},"required":["url"] }`,
-		},
-		{
-			Name:        "browser_copy",
-			Description: "Copy content from a web page using a headless browser. Use this when the page requires JavaScript to render (SPA apps like React/Vue), or when content is loaded dynamically after page load. Falls back gracefully if the browser is unavailable. This tool is more resource-intensive than web_fetch; prefer web_fetch for static pages. Only http/https URLs are allowed.",
-			InputSchema: `{"type":"object","properties":{"url":{"type":"string","description":"The URL of the web page to copy from"},"wait_for":{"type":"string","description":"Optional CSS selector to wait for before extracting content (e.g., '.article-body')"},"scroll_down":{"type":"boolean","description":"Whether to scroll down to trigger lazy-loading","default":false},"headless":{"type":"boolean","description":"Run browser in headless mode (default true). Set false to show the browser window.","default":true}},"required":["url"] }`,
+			Name:        "plan_mode_respond",
+			Description: "Respond to the user in plan mode. Use this to present your plan, ask questions, or engage in back-and-forth conversation before implementing.",
+			InputSchema: `{"type":"object","properties":{"response":{"type":"string","description":"The response to present to the user in plan mode"}},"required":["response"] }`,
 		},
 	}
 }
 
-// GetPlanModeToolDescriptions returns tool descriptions for plan mode
-func GetPlanModeToolDescriptions() []ToolDescription {
-	allTools := GetToolDescriptions()
-	var planTools []ToolDescription
-
-	actOnlyTools := map[string]bool{
+// Mode restrictions, mirroring the AllowedModes of tools.InitDefaultRegistry().
+// Side-effect tools are act-only; plan_mode_respond exists only to talk to the
+// user in plan mode. These maps are pinned to the registry by system_test.go.
+var (
+	// actOnlyTools have side effects and are usable in act mode only.
+	actOnlyTools = map[string]bool{
 		"write_to_file":   true,
 		"replace_in_file": true,
 		"execute_command": true,
 	}
 
-	for _, tool := range allTools {
-		if !actOnlyTools[tool.Name] {
-			planTools = append(planTools, tool)
+	// planOnlyTools are usable in plan mode only.
+	planOnlyTools = map[string]bool{
+		"plan_mode_respond": true,
+	}
+)
+
+// filterToolDescriptions drops the tools whose names appear in excluded.
+func filterToolDescriptions(all []ToolDescription, excluded map[string]bool) []ToolDescription {
+	filtered := make([]ToolDescription, 0, len(all))
+	for _, tool := range all {
+		if !excluded[tool.Name] {
+			filtered = append(filtered, tool)
 		}
 	}
+	return filtered
+}
 
-	return planTools
+// GetPlanModeToolDescriptions returns tool descriptions for plan mode
+func GetPlanModeToolDescriptions() []ToolDescription {
+	return filterToolDescriptions(GetToolDescriptions(), actOnlyTools)
 }
 
 // GetActModeToolDescriptions returns tool descriptions for act mode
 func GetActModeToolDescriptions() []ToolDescription {
-	return GetToolDescriptions()
+	return filterToolDescriptions(GetToolDescriptions(), planOnlyTools)
 }
 
 // FormatToolUseExample returns an example of how to use a tool

@@ -162,6 +162,9 @@ type Provider interface {
   - `execute_command`（跨平台 shell 选择；超时与输出截断；**输出上限可配置**）
   - `search_files`（glob + 内容 grep 二合一）
   - `list_files`
+  - `list_code_definition_names`（**保留并注册**，2026-08-28 定稿：提示词
+    CAPABILITIES 段宣传该工具，实现完整且只读、可流预派发；plan/act 双模式，
+    CategoryCode；结果 30s 缓存，上限 500 条）
   - `attempt_completion`（终结工具，保留）
   - `ask_followup_question`（可选启用；headless 场景由使用方注入应答 handler）
 - **剔除**：browser_copy / kb_ingest / memory_note / use_skill / use_subagents /

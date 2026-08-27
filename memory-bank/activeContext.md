@@ -9,6 +9,30 @@ M2 全部完成；下一步 **M3：Anthropic 适配器**。
 
 ## 近期变更
 
+- 2026-08-28：**list_code_definition_names 漂移修复 + 提示词↔Registry 守卫**：
+  - 问题：prompts/system.go CAPABILITIES 段宣传 `list_code_definition_names`，
+    但 `InitDefaultRegistry` 未注册——模型一旦调用必报 "tool not found"。
+    该工具（tools/search.go:548，含 30s 列表缓存）实现完整却无人注册、无测试。
+  - 定稿（M4 待决项）：**方案①注册**——tools/init.go 注册（plan/act 双模式、
+    CategoryCode、无需确认）；types.ToolName 补 `ToolListCodeDefinitionNames`；
+    `GetDefaultTools`/`GetToolsForMode` 同步；只读属性天然兼容流预派发。
+  - 顺带定稿 prompts 静态目录：GetToolDescriptions 删掉 3 个从未实现、且在
+    requirements §4.3/§10 剔除清单里的幻影工具（use_subagents/web_fetch/
+    browser_copy），补上漏掉的 plan_mode_respond；模式过滤改为包级
+    actOnlyTools/planOnlyTools 映射（与 Registry AllowedModes 镜像）。
+  - 守卫测试（新增）：
+    - loop/prompt_guard_test.go：①提示词中每个 snake_case 工具名形状 token
+      必须是 Registry 工具或 `nonToolIdentifiers` 白名单（schema 属性名/
+      提示词标记，如 file_pattern、environment_details）；②Registry 每个模式
+      工具都必须出现在提示词中；③AVAILABLE TOOLS 段只宣传当前模式允许的
+      工具。已验证撤掉注册时测试立刻红（能复现原始 bug）。
+    - prompts/system_test.go：GetToolDescriptions = Registry 全集，
+      GetActMode/GetPlanModeToolDescriptions = Registry 对应模式子集。
+  - 新增工具单测 tools/search_test.go TestListCodeDefinitionNames（Go/Python
+    定义识别、file_pattern 过滤、缓存命中、缺路径、path 必填）。
+  - 验收：`go build/vet/gofmt` 干净，`go list -m all` 仅本模块，
+    `go test -race -count=2 ./...` 全绿。
+
 - 2026-08-28：**根包门面完成（commit 5f6e6ca）**：
   - agentcore.go（根包）：`Config`（平铺全可选：APIKey/BaseURL/Model 派生
     openai provider；Tools nil=默认九件套；Mode/AutoApprove/MaxTokens/
@@ -71,8 +95,8 @@ M2 全部完成；下一步 **M3：Anthropic 适配器**。
      cache_control（system ephemeral）；stop_reason 映射；overloaded_error。
    - 同步建连（照 openai.go 手术后的结构直接写对，非 2xx → HTTPError）。
    - httptest 假 SSE 逐事件断言。
-2. **M4**：compact 双策略（Summarize 新写 + Trim 回退）+ 工具集定稿
-   （含 list_code_definition_names 去留）。
+2. **M4**：compact 双策略（Summarize 新写 + Trim 回退）+ 工具行为定稿
+   （截断/超时/大文件策略；list_code_definition_names 去留已定稿：保留并注册）。
 3. **M5**：examples + README 中英 + Maestro embedded 验证 → tag v0.1.0。
 
 ## 活跃决策
@@ -85,6 +109,9 @@ M2 全部完成；下一步 **M3：Anthropic 适配器**。
   流中错误；Options.RetryDelays 空 = 关闭。
 - **OnToolCallUpdate** 只在同步执行分支发（预派发复用路径不发，
   避免"已跑完还显示 running"的误导）。
+- **工具集定稿（M4 部分）**：list_code_definition_names 保留并注册（默认
+  Registry 共 10 个工具）；提示词提及的每个工具必须有对应注册项，由
+  loop/prompt_guard_test.go 强制。
 - 仓库推送已提前完成；tag/release 留到 M5。
 
 ## 经验与洞察（来自调研）
