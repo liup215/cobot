@@ -16,11 +16,14 @@
 - [ ] LICENSE (MIT)
 
 ### M1 骨架迁移（零第三方依赖）
-- [ ] types/ 收编 gline pkg/types（剔除 render/slash，加 Estimator 注入）
-- [ ] provider/ 接口层 + openai 兼容（移植）+ mock（增强脚本化回放）
+- [x] types/ 收编 gline pkg/types（剔除 render/slash，加 Estimator 注入）
+- [x] provider/ 接口层（Provider/StreamChunk/Request/Response，源自 internal/agent/provider.go）
+- [x] provider/ openai 兼容（移植，SSE + tool_calls 增量聚合 + reasoning_content 透传）
+- [x] provider/ mock（场景化回放）+ registry（工厂注册表，ProviderConfig 复用接口层定义）
+- [x] provider/ 验收：`go list -m all` 无第三方；6 单测 -race 全绿；无不可见字符
 - [ ] tools/ Tool/Registry + 六件套 + attempt_completion(+ask_followup)
 - [ ] tools/ XML 兜底解析（移植 + 测试）
-- [ ] 验收：`go list -m all` 无第三方；gline 相关单测移植通过
+- [ ] 验收：gline 相关单测移植通过
 
 ### M2 loop 重构
 - [ ] agent.go 1173 行拆分：主循环 / 流处理 / 工具执行（先固化行为基线测试）
@@ -50,7 +53,8 @@
 
 ## Current Status
 
-**预开发阶段（M0 剩余：go.mod + LICENSE）**。需求与设计已冻结，GitHub 托管已就绪，可随时开工。
+**M1 进行中（types + provider 完成，剩 tools/）**。provider 迁移验证了
+cp+sed 复制流程可行且干净，tools 迁移照此执行。
 
 ## Known Issues / 风险
 
@@ -69,3 +73,5 @@
 | 2026-08-28 | 明确不做：TUI/extensions/会话树/OAuth/MCP/记忆/浏览器/编排/Skills | v0.2+ 候选，避免范围蔓延 |
 | 2026-08-28 | 需求文档纳入 memory bank 体系 | 用户指定的工作流 |
 | 2026-08-28 | 仓库提前推送（原计划 M5 后） | 用户指令「直接先推送到 github」；v0.1.0 tag/release 仍留到 M5 |
+| 2026-08-28 | 迁移流程定为 cp+sed 字节级复制，禁止 write 重写 | write 重写 provider 文件反复引入不可见字符；cp+sed 零风险且语义零改动 |
+| 2026-08-28 | provider 双 ToolCall 并存（provider.ToolCall string 版 / types.ToolCall RawMessage 版） | 与 gline 语义一致，M2 loop 拆分时再统一归口 |

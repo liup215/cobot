@@ -2,36 +2,37 @@
 
 ## 当前工作焦点
 
-**M0：仓库初始化**——写需求（已完成）、建 go.mod、LICENSE、.gitignore、
-README 骨架，然后进入 M1 骨架迁移。
+**M1 骨架迁移**——types 与 provider 已完成，接下来是 tools/ 六件套 +
+XML 兜底。
 
 ## 近期变更
 
-- 2026-08-28：项目创建于 `C:/Users/22569/Documents/20-Projects/agent-core`。
-  完成三路线调研（pi RPC 子进程 / pi Go 移植 / gline 提取），选定 gline 提取。
-- 2026-08-28：requirements.md 定稿（v0.1），纳入 memory bank 体系管理。
-- 2026-08-28：**仓库已创建并推送**：https://github.com/liup215/agentcore（public，
-  main 分支，origin 已配置）。注意：这只是仓库托管；v0.1.0 tag/release 仍按
-  里程碑 M5 完成后再发。
+- 2026-08-28：**provider 包迁移完成（commit 477b224）**。采用“cp 字节级复制
+  + sed 仅改包名/路径/前缀”的流程，彻底避免 write 重写引入不可见字符：
+  - provider/provider.go（接口层，源 gline internal/agent/provider.go）
+  - provider/openai.go（SSE 流式，源 internal/api/openai.go；zerolog 23 处
+    调用改为 log/slog shim，见 provider/log.go）
+  - provider/mock.go、registry.go（registry 内重复 ProviderConfig 已删，
+    复用接口层定义）、openai_test.go（6 测试全绿，-race）
+  - gline 语义零改动；CRLF 已统一为 LF；perl 扫描确认无零宽/BOM 字符。
+- 2026-08-28：types 包迁移完成（message/conversation/token-estimator）。
+- 2026-08-28：仓库创建并推送 https://github.com/liup215/agentcore。
+
+**重要经验**：从 gline 迁移文件一律用 `cp` + 字节级 `sed`（包名、import
+路径、`agent.` 前缀、log 前缀），禁止用 write 工具重写源文件——之前用
+write 创建 provider 文件反复出现特殊不可见字符导致失败。
 
 ## 下一步（按里程碑顺序）
 
-1. **M0**：`go mod init github.com/liup215/agentcore`（go 1.25）、MIT LICENSE、
-   .gitignore、README（指向 memory-bank/requirements.md）、首次 git commit。
-2. **M1**：从 gline 复制手术清单（requirements.md §10）标注的文件到
-   types/ tools/ provider/，剔除第三方依赖，移植现有单测。
-   关键源文件：
-   - `gline/pkg/types/`（message.go 等，剔除 render/slash）
-   - `gline/internal/api/openai.go`、`registry.go`、`mock.go`
-   - `gline/internal/tools/`（tool.go/registry.go/init.go 及六件套实现）
-   - `gline/internal/agent/xml_tools.go`
-3. **M2**：`gline/internal/agent/agent.go`（1173 行）拆分重构为
+1. **M1 剩余**：tools/ —— `gline/internal/tools/`（tool.go/registry.go/
+   init.go 及六件套实现，同样用 cp+sed 流程）+ `xml_tools.go` 兜底解析。
+2. **M2**：`gline/internal/agent/agent.go`（1173 行）拆分重构为
    主循环/流处理/工具执行三段，先固化行为基线测试再动手。
-4. **M3**：新写 Anthropic 适配器（参照 pi 的 anthropic-messages.ts 移植）。
-5. **M4**：compact 双策略 + 工具集裁剪定稿。
-6. **M5**：examples + README 中英 + Maestro embedded 后端接入验证 →
-   发 v0.1.0（`git tag v0.1.0 && git push origin v0.1.0` + `gh release create`；
-   仓库已于 2026-08-28 创建，此步只剩打 tag 与 release）。
+3. **M3**：新写 Anthropic 适配器（参照 pi 的 anthropic-messages.ts 移植；
+   可直接拷贝 provider/openai.go 作为骨架再改事件解析）。
+4. **M4**：compact 双策略 + 工具集裁剪定稿。
+5. **M5**：examples + README 中英 + Maestro embedded 后端接入验证 →
+   发 v0.1.0（仓库已存在，此步只剩打 tag 与 release）。
 
 ## 活跃决策
 
