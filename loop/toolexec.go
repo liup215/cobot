@@ -114,7 +114,12 @@ func (a *BaseAgent) executeToolCalls(ctx context.Context, lastMsg types.Message,
 			result = pre.result
 			execErr = pre.err
 		} else {
-			// Execute the tool synchronously as fallback.
+			// Executing synchronously now — surface the state change.
+			callback.OnToolCallUpdate(ToolCall{
+				ID:    tc.ID,
+				Name:  tc.Name,
+				Input: string(tc.Input),
+			}, "running")
 			result, execErr = tool.Execute(ctx, tc.Input)
 			if execErr != nil {
 				result = fmt.Sprintf("Error: %v", execErr)

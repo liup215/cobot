@@ -19,20 +19,35 @@ import (
 
 // recordingCallback captures every callback event for assertions.
 type recordingCallback struct {
-	mu              sync.Mutex
-	contents        []string
-	reasonings      []string
-	streamStarts    int
-	toolStarts      []provider.ToolCall
-	toolCompletions []toolCompletion
-	errors          []error
-	completed       int
-	taskCreated     []string
+	mu               sync.Mutex
+	contents         []string
+	reasonings       []string
+	streamStarts     int
+	toolStarts       []provider.ToolCall
+	toolCompletions  []toolCompletion
+	errors           []error
+	completed        int
+	taskCreated      []string
+	updates          []toolUpdate
+	compactionStarts []string
+	compactionEnds   []string
+	retries          []retryEvent
 }
 
 type toolCompletion struct {
 	tc     provider.ToolCall
 	result string
+}
+
+type toolUpdate struct {
+	tc     provider.ToolCall
+	status string
+}
+
+type retryEvent struct {
+	attempt int
+	err     error
+	delay   time.Duration
 }
 
 func (c *recordingCallback) OnContent(delta string) {
@@ -78,19 +93,44 @@ func (c *recordingCallback) OnTaskCreated(id string) {
 	defer c.mu.Unlock()
 	c.taskCreated = append(c.taskCreated, id)
 }
+func (c *recordingCallback) OnToolCallUpdate(tc provider.ToolCall, status string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.updates = append(c.updates, toolUpdate{tc, status})
+}
+func (c *recordingCallback) OnCompactionStart(reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.compactionStarts = append(c.compactionStarts, reason)
+}
+func (c *recordingCallback) OnCompactionEnd(summary string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.compactionEnds = append(c.compactionEnds, summary)
+}
+func (c *recordingCallback) OnRetry(attempt int, err error, delay time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.retries = append(c.retries, retryEvent{attempt, err, delay})
+}
+
+// snapshot returns a copy of the recorded events without copying the mutex.
 func (c *recordingCallback) snapshot() recordingCallback {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Copy fields manually to avoid copying the embedded mutex.
 	return recordingCallback{
-		contents:        c.contents,
-		reasonings:      c.reasonings,
-		streamStarts:    c.streamStarts,
-		toolStarts:      c.toolStarts,
-		toolCompletions: c.toolCompletions,
-		errors:          c.errors,
-		completed:       c.completed,
-		taskCreated:     c.taskCreated,
+		contents:         c.contents,
+		reasonings:       c.reasonings,
+		streamStarts:     c.streamStarts,
+		toolStarts:       c.toolStarts,
+		toolCompletions:  c.toolCompletions,
+		errors:           c.errors,
+		completed:        c.completed,
+		taskCreated:      c.taskCreated,
+		updates:          c.updates,
+		compactionStarts: c.compactionStarts,
+		compactionEnds:   c.compactionEnds,
+		retries:          c.retries,
 	}
 }
 
@@ -556,5 +596,134 @@ func TestAbortStopsRun(t *testing.T) {
 	}
 	if agent.IsRunning() {
 		t.Error("agent still running after abort")
+	}
+}
+
+// ─── automatic stream retry (FR-T4) ──────────────────────────────────────────
+
+// flakyProvider fails the first N CreateMessageStream calls with a
+// retryable HTTPError, then delegates to the wrapped provider.
+type flakyProvider struct {
+	inner        provider.Provider
+	failuresLeft int
+	status       int
+	calls        int
+	mu           sync.Mutex
+}
+
+func (f *flakyProvider) CreateMessageStream(ctx context.Context, req *provider.MessageRequest) (<-chan provider.StreamChunk, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.calls <= f.failuresLeft {
+		return nil, &provider.HTTPError{Status: f.status, Message: "temporary failure"}
+	}
+	return f.inner.CreateMessageStream(ctx, req)
+}
+func (f *flakyProvider) CreateMessage(ctx context.Context, req *provider.MessageRequest) (*provider.MessageResponse, error) {
+	return f.inner.CreateMessage(ctx, req)
+}
+func (f *flakyProvider) SupportsTools() bool     { return f.inner.SupportsTools() }
+func (f *flakyProvider) GetModel() string        { return f.inner.GetModel() }
+func (f *flakyProvider) GetProviderName() string { return f.inner.GetProviderName() }
+
+func newFlakyAgent(t *testing.T, failures int, status int, delays []time.Duration) (*BaseAgent, *echoTool, *flakyProvider) {
+	t.Helper()
+	inner := provider.NewScriptedProvider(
+		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c1", "done")}},
+	)
+	flaky := &flakyProvider{inner: inner, failuresLeft: failures, status: status}
+	reg := tools.NewRegistry()
+	echo := &echoTool{}
+	reg.Register(&tools.ToolInfo{Tool: echo, AllowedModes: []string{"act"}})
+	reg.Register(&tools.ToolInfo{Tool: tools.NewAttemptCompletionTool(), AllowedModes: []string{"act"}})
+	agent, err := New(Options{Provider: flaky, ToolRegistry: reg, RetryDelays: delays})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agent, echo, flaky
+}
+
+// Retryable failures (503) are retried until the connection succeeds; each
+// retry is reported via OnRetry and the run then completes normally.
+func TestRetryRecoversFromConnectionErrors(t *testing.T) {
+	agent, _, flaky := newFlakyAgent(t, 2, 503, []time.Duration{0, 0})
+	cb := &recordingCallback{}
+	if err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if flaky.calls != 3 { // 2 failures + 1 success
+		t.Errorf("provider called %d times, want 3", flaky.calls)
+	}
+	snap := cb.snapshot()
+	if len(snap.retries) != 2 {
+		t.Fatalf("OnRetry fired %d times, want 2", len(snap.retries))
+	}
+	if snap.retries[0].attempt != 1 || snap.retries[1].attempt != 2 {
+		t.Errorf("retry attempts = %d, %d; want 1, 2", snap.retries[0].attempt, snap.retries[1].attempt)
+	}
+	if snap.completed != 1 {
+		t.Errorf("OnComplete fired %d times, want 1", snap.completed)
+	}
+}
+
+// 4xx parameter errors are permanent: the retry wrapper gives up
+// immediately and each main-loop round burns a mistake until the run
+// terminates at the consecutive-mistakes limit.
+func TestNoRetryOn4xx(t *testing.T) {
+	agent, _, flaky := newFlakyAgent(t, 99, 400, []time.Duration{0})
+	cb := &recordingCallback{}
+	err := agent.RunWithCallback(context.Background(), "task", cb)
+	if err == nil {
+		t.Fatal("want error for 400, got nil")
+	}
+	if !strings.Contains(err.Error(), "max consecutive mistakes") {
+		t.Errorf("want mistakes-limit error, got %v", err)
+	}
+	if flaky.calls != 3 {
+		t.Errorf("provider called %d times, want 3 (one per main-loop round, no retries)", flaky.calls)
+	}
+	if len(cb.snapshot().retries) != 0 {
+		t.Error("OnRetry fired for a 4xx error")
+	}
+}
+
+// An empty non-nil RetryDelays slice disables retrying entirely.
+func TestRetryDisabledWithEmptyDelays(t *testing.T) {
+	agent, _, flaky := newFlakyAgent(t, 3, 503, []time.Duration{})
+	cb := &recordingCallback{}
+	if err := agent.RunWithCallback(context.Background(), "task", cb); err == nil {
+		t.Fatal("want error when retries are disabled")
+	}
+	// No retries: each of the 3 main-loop rounds creates one stream, then
+	// the consecutive-mistakes limit terminates the run.
+	if flaky.calls != 3 {
+		t.Errorf("provider called %d times, want 3", flaky.calls)
+	}
+	if len(cb.snapshot().retries) != 0 {
+		t.Error("OnRetry fired although retries are disabled")
+	}
+}
+
+// ─── compaction + tool update callbacks ──────────────────────────────────────
+
+// When the token budget is exceeded the loop emits OnCompactionStart/End.
+func TestCompactionEventsFire(t *testing.T) {
+	// Tiny budget: a single big user message crosses the 60% line.
+	agent, _ := newTestAgent(t,
+		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c1", "done")}},
+	)
+	agent.conversation.MaxTokens = 200
+	agent.conversation.ResponseBuffer = 0
+	cb := &recordingCallback{}
+	if err := agent.RunWithCallback(context.Background(), "a very long task prompt that exceeds the tiny token budget for sure", cb); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	snap := cb.snapshot()
+	if len(snap.compactionStarts) == 0 {
+		t.Error("OnCompactionStart never fired")
+	}
+	if len(snap.compactionEnds) == 0 {
+		t.Error("OnCompactionEnd never fired")
 	}
 }

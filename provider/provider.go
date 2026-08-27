@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/liup215/agentcore/types"
 )
@@ -198,6 +199,11 @@ type StreamCallback interface {
 	// OnToolCallComplete is called when a tool call completes with its result
 	OnToolCallComplete(toolCall ToolCall, result string)
 
+	// OnToolCallUpdate is called with progress/status updates while a tool
+	// is executing (e.g. "running" before a synchronous execution). It lets
+	// UIs show live tool state without waiting for completion.
+	OnToolCallUpdate(toolCall ToolCall, status string)
+
 	// AskFollowupQuestion is invoked when the agent needs to prompt the user for clarification.
 	// Implementations should present the question/options to the user and return their selected answer.
 	AskFollowupQuestion(question string, options []string) (string, error)
@@ -211,20 +217,38 @@ type StreamCallback interface {
 	// OnTaskCreated is called when a new task is created with its persistent ID.
 	// This allows the UI to associate the conversation with a stored task.
 	OnTaskCreated(taskID string)
+
+	// OnCompactionStart is called before the agent trims or compacts the
+	// conversation to fit the token budget. The reason describes the trigger
+	// (e.g. "token budget 75% of 128000").
+	OnCompactionStart(reason string)
+
+	// OnCompactionEnd is called after compaction finished; the summary
+	// describes the outcome (remaining token estimate).
+	OnCompactionEnd(summary string)
+
+	// OnRetry is called when the agent retries a failed stream connection.
+	// attempt is the upcoming retry number (1-based), err is the failure
+	// being retried, nextDelay is how long the loop will wait first.
+	OnRetry(attempt int, err error, nextDelay time.Duration)
 }
 
 // StreamCallbackAdapter is a no-op adapter for non-streaming scenarios.
 // It also provides a simple CLI fallback implementation for AskFollowupQuestion.
 type StreamCallbackAdapter struct{}
 
-func (a *StreamCallbackAdapter) OnContent(delta string)                              {}
-func (a *StreamCallbackAdapter) OnReasoning(delta string)                            {}
-func (a *StreamCallbackAdapter) OnStreamStart()                                      {}
-func (a *StreamCallbackAdapter) OnToolCallStart(toolCall ToolCall)                   {}
-func (a *StreamCallbackAdapter) OnToolCallComplete(toolCall ToolCall, result string) {}
-func (a *StreamCallbackAdapter) OnError(err error)                                   {}
-func (a *StreamCallbackAdapter) OnComplete()                                         {}
-func (a *StreamCallbackAdapter) OnTaskCreated(taskID string)                         {}
+func (a *StreamCallbackAdapter) OnContent(delta string)                                  {}
+func (a *StreamCallbackAdapter) OnReasoning(delta string)                                {}
+func (a *StreamCallbackAdapter) OnStreamStart()                                          {}
+func (a *StreamCallbackAdapter) OnToolCallStart(toolCall ToolCall)                       {}
+func (a *StreamCallbackAdapter) OnToolCallComplete(toolCall ToolCall, result string)     {}
+func (a *StreamCallbackAdapter) OnToolCallUpdate(toolCall ToolCall, status string)       {}
+func (a *StreamCallbackAdapter) OnCompactionStart(reason string)                         {}
+func (a *StreamCallbackAdapter) OnCompactionEnd(summary string)                          {}
+func (a *StreamCallbackAdapter) OnRetry(attempt int, err error, nextDelay time.Duration) {}
+func (a *StreamCallbackAdapter) OnError(err error)                                       {}
+func (a *StreamCallbackAdapter) OnComplete()                                             {}
+func (a *StreamCallbackAdapter) OnTaskCreated(taskID string)                             {}
 
 // AskFollowupQuestion provides a CLI fallback when no UI callback is available.
 // It prints the question and options to stdout and reads from stdin.

@@ -496,158 +496,154 @@ func (p *OpenAIProvider) CreateMessageStream(ctx context.Context, req *MessageRe
 		return nil, fmt.Errorf("API key is required")
 	}
 
-	// Create the channel for streaming chunks
-	chunkChan := make(chan StreamChunk)
+	// Convert messages to OpenAI format
+	openaiMessages := make([]OpenAIMessage, 0, len(req.Messages))
 
-	// Build the request in a goroutine
-	go func() {
-		defer close(chunkChan)
-
-		// Convert messages to OpenAI format
-		openaiMessages := make([]OpenAIMessage, 0, len(req.Messages))
-
-		// Determine last user index so we only attach reasoning_content to assistant messages from the current turn.
-		lastUserIndex := -1
-		for i := len(req.Messages) - 1; i >= 0; i-- {
-			if req.Messages[i].Role == types.RoleUser {
-				lastUserIndex = i
-				break
-			}
+	// Determine last user index so we only attach reasoning_content to assistant messages from the current turn.
+	lastUserIndex := -1
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == types.RoleUser {
+			lastUserIndex = i
+			break
 		}
+	}
 
-		for i, msg := range req.Messages {
-			switch msg.Role {
-			case types.RoleSystem:
-				openaiMessages = append(openaiMessages, OpenAIMessage{
-					Role:    "system",
-					Content: msg.Content,
-				})
-			case types.RoleUser:
-				openaiMessages = append(openaiMessages, OpenAIMessage{
-					Role:    "user",
-					Content: msg.Content,
-				})
-			case types.RoleAssistant:
-				// Include tool calls if present - required by OpenAI API
-				openaiMsg := OpenAIMessage{
-					Role:    "assistant",
-					Content: msg.Content,
-				}
-				// Attach reasoning_content only for assistant messages that belong to the current turn
-				// i.e., assistant messages that come after the last user message in the history.
-				if i > lastUserIndex && msg.ReasoningContent != "" {
-					openaiMsg.ReasoningContent = msg.ReasoningContent
-				}
-				if len(msg.ToolCalls) > 0 {
-					openaiMsg.ToolCalls = convertToolCallsToOpenAI(msg.ToolCalls)
-				}
-				openaiMessages = append(openaiMessages, openaiMsg)
-			case types.RoleTool:
-				openaiMessages = append(openaiMessages, OpenAIMessage{
-					Role:       "tool",
-					Content:    msg.Content,
-					ToolCallID: msg.ToolCallID,
-				})
-			}
-		}
-
-		// Add system prompt if provided
-		if req.SystemPrompt != "" {
-			systemMsg := OpenAIMessage{
+	for i, msg := range req.Messages {
+		switch msg.Role {
+		case types.RoleSystem:
+			openaiMessages = append(openaiMessages, OpenAIMessage{
 				Role:    "system",
-				Content: req.SystemPrompt,
+				Content: msg.Content,
+			})
+		case types.RoleUser:
+			openaiMessages = append(openaiMessages, OpenAIMessage{
+				Role:    "user",
+				Content: msg.Content,
+			})
+		case types.RoleAssistant:
+			// Include tool calls if present - required by OpenAI API
+			openaiMsg := OpenAIMessage{
+				Role:    "assistant",
+				Content: msg.Content,
 			}
-			openaiMessages = append([]OpenAIMessage{systemMsg}, openaiMessages...)
-		}
-
-		// Convert tools to OpenAI format
-		openaiTools := make([]OpenAITool, 0, len(req.Tools))
-		for _, tool := range req.Tools {
-			openaiTools = append(openaiTools, OpenAITool{
-				Type: "function",
-				Function: OpenAIToolFunction{
-					Name:        tool.Name,
-					Description: tool.Description,
-					Parameters:  tool.InputSchema,
-				},
+			// Attach reasoning_content only for assistant messages that belong to the current turn
+			// i.e., assistant messages that come after the last user message in the history.
+			if i > lastUserIndex && msg.ReasoningContent != "" {
+				openaiMsg.ReasoningContent = msg.ReasoningContent
+			}
+			if len(msg.ToolCalls) > 0 {
+				openaiMsg.ToolCalls = convertToolCallsToOpenAI(msg.ToolCalls)
+			}
+			openaiMessages = append(openaiMessages, openaiMsg)
+		case types.RoleTool:
+			openaiMessages = append(openaiMessages, OpenAIMessage{
+				Role:       "tool",
+				Content:    msg.Content,
+				ToolCallID: msg.ToolCallID,
 			})
 		}
+	}
 
-		// Build request
-		openaiReq := OpenAIRequest{
-			Model:       p.model,
-			Messages:    openaiMessages,
-			Temperature: req.Temperature,
-			MaxTokens:   req.MaxTokens,
-			Stream:      true,
+	// Add system prompt if provided
+	if req.SystemPrompt != "" {
+		systemMsg := OpenAIMessage{
+			Role:    "system",
+			Content: req.SystemPrompt,
 		}
+		openaiMessages = append([]OpenAIMessage{systemMsg}, openaiMessages...)
+	}
 
-		// Only add tools if there are any
-		if len(openaiTools) > 0 {
-			openaiReq.Tools = openaiTools
-			// Force tool use whenever tools are provided and the agent loop signals work is pending.
-			if req.ToolChoice == ToolChoiceRequired {
-				openaiReq.ToolChoice = "required"
-			}
+	// Convert tools to OpenAI format
+	openaiTools := make([]OpenAITool, 0, len(req.Tools))
+	for _, tool := range req.Tools {
+		openaiTools = append(openaiTools, OpenAITool{
+			Type: "function",
+			Function: OpenAIToolFunction{
+				Name:        tool.Name,
+				Description: tool.Description,
+				Parameters:  tool.InputSchema,
+			},
+		})
+	}
+
+	// Build request
+	openaiReq := OpenAIRequest{
+		Model:       p.model,
+		Messages:    openaiMessages,
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+		Stream:      true,
+	}
+
+	// Only add tools if there are any
+	if len(openaiTools) > 0 {
+		openaiReq.Tools = openaiTools
+		// Force tool use whenever tools are provided and the agent loop signals work is pending.
+		if req.ToolChoice == ToolChoiceRequired {
+			openaiReq.ToolChoice = "required"
 		}
+	}
 
-		// Set defaults
-		if openaiReq.MaxTokens == 0 {
-			openaiReq.MaxTokens = 4096
+	// Set defaults
+	if openaiReq.MaxTokens == 0 {
+		openaiReq.MaxTokens = 4096
+	}
+	if openaiReq.Temperature == 0 {
+		openaiReq.Temperature = 0.0
+	}
+
+	// Serialize request
+	jsonBody, err := json.Marshal(openaiReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// Build full URL by appending the chat completions path
+	fullURL := buildFullURL(p.baseURL)
+	logInfof("CreateMessageStream: Sending request to %s (tools=%d, tool_choice=%v)", fullURL, len(openaiReq.Tools), openaiReq.ToolChoice)
+	logDebugf("CreateMessageStream request system prompt length=%d body=%d", len(openaiReq.Messages[0].Content), len(jsonBody))
+
+	// Create HTTP request
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set headers
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+
+	// Send request
+	resp, err := p.httpClient.Do(httpReq)
+	if err != nil {
+		// Network-level failure: retryable by the agent loop retry policy.
+		return nil, &HTTPError{Status: 0, Message: fmt.Sprintf("failed to send request: %v", err), Err: err}
+	}
+
+	// Check status code (synchronous so the caller can retry)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		var openaiErr OpenAIError
+		msg := fmt.Sprintf("OpenAI API returned status %d: %s", resp.StatusCode, string(body))
+		if err := json.Unmarshal(body, &openaiErr); err == nil && openaiErr.Error.Message != "" {
+			msg = fmt.Sprintf("OpenAI API error: %s (type: %s, code: %s)",
+				openaiErr.Error.Message, openaiErr.Error.Type, openaiErr.Error.Code)
 		}
-		if openaiReq.Temperature == 0 {
-			openaiReq.Temperature = 0.0
+		return nil, &HTTPError{
+			Status:     resp.StatusCode,
+			Message:    msg,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
 		}
+	}
 
-		// Serialize request
-		jsonBody, err := json.Marshal(openaiReq)
-		if err != nil {
-			chunkChan <- StreamChunk{Error: fmt.Errorf("failed to marshal request: %w", err), Done: true}
-			return
-		}
+	// From here on the connection is established: stream SSE in a goroutine.
 
-		// Build full URL by appending the chat completions path
-		fullURL := buildFullURL(p.baseURL)
-		logInfof("CreateMessageStream: Sending request to %s (tools=%d, tool_choice=%v)", fullURL, len(openaiReq.Tools), openaiReq.ToolChoice)
-		logDebugf("CreateMessageStream request system prompt length=%d body=%d", len(openaiReq.Messages[0].Content), len(jsonBody))
+	chunkChan := make(chan StreamChunk)
 
-		// Create HTTP request
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewBuffer(jsonBody))
-		if err != nil {
-			chunkChan <- StreamChunk{Error: fmt.Errorf("failed to create request: %w", err), Done: true}
-			return
-		}
-
-		// Set headers
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-
-		// Send request
-		resp, err := p.httpClient.Do(httpReq)
-		if err != nil {
-			chunkChan <- StreamChunk{Error: fmt.Errorf("failed to send request: %w", err), Done: true}
-			return
-		}
+	go func() {
+		defer close(chunkChan)
 		defer resp.Body.Close()
-
-		// Check status code
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			var openaiErr OpenAIError
-			if err := json.Unmarshal(body, &openaiErr); err == nil && openaiErr.Error.Message != "" {
-				chunkChan <- StreamChunk{
-					Error: fmt.Errorf("OpenAI API error: %s (type: %s, code: %s)",
-						openaiErr.Error.Message, openaiErr.Error.Type, openaiErr.Error.Code),
-					Done: true,
-				}
-			} else {
-				chunkChan <- StreamChunk{
-					Error: fmt.Errorf("OpenAI API returned status %d: %s", resp.StatusCode, string(body)),
-					Done:  true,
-				}
-			}
-			return
-		}
 
 		// Parse SSE stream
 		reader := bufio.NewReader(resp.Body)

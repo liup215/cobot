@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/liup215/agentcore/prompts"
 	"github.com/liup215/agentcore/provider"
@@ -111,6 +112,12 @@ type Options struct {
 
 	// MaxTokens is the maximum context tokens for the conversation (0 = default 128k)
 	MaxTokens int
+
+	// RetryDelays configures automatic stream-connection retries. Each entry
+	// is the backoff wait before retry attempt i+1; a server Retry-After hint
+	// longer than the entry wins. nil = DefaultRetryDelays (1s/2s/4s/8s);
+	// empty non-nil slice disables retrying.
+	RetryDelays []time.Duration
 }
 
 // BaseAgent implements the Agent interface
@@ -132,6 +139,8 @@ type BaseAgent struct {
 	taskID     string
 	taskTitle  string
 	workingDir string
+
+	retryDelays []time.Duration // stream-connection retry schedule (nil = default)
 
 	// Stream pre-dispatch: tool calls start executing while the SSE stream is still ongoing.
 	pendingToolCallsMu     sync.Mutex
@@ -190,6 +199,7 @@ func New(opts Options) (*BaseAgent, error) {
 		guard:                  opts.Guard,
 		store:                  opts.Store,
 		taskTitle:              opts.Title,
+		retryDelays:            opts.RetryDelays,
 	}, nil
 }
 
@@ -265,7 +275,11 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 		systemPrompt := prompts.GetSystemPrompt(string(a.mode), toolDescs, a.customRules, nil)
 
 		// Trim conversation if it exceeds token budget before sending.
-		a.conversation.TrimToMaxTokens()
+		if a.conversation.IsTokenAboveThreshold(100) {
+			callback.OnCompactionStart(fmt.Sprintf("trim: conversation exceeds max tokens (%d)", a.conversation.MaxTokens))
+			a.conversation.TrimToMaxTokens()
+			callback.OnCompactionEnd(fmt.Sprintf("trim complete: %d tokens", a.conversation.GetTotalTokens()))
+		}
 
 		// Auto-compact if tokens exceed 60% of the max context.
 		// Earlier compaction prevents the token budget from growing too
@@ -281,7 +295,7 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 		// Pre-request token budget check. Ensure system prompt + messages +
 		// tool descriptions fit inside the context window with room for the
 		// response. Trigger compaction if we are close to the limit.
-		a.enforceTokenBudget(ctx, systemPrompt, availableTools)
+		a.enforceTokenBudget(ctx, systemPrompt, availableTools, callback)
 
 		// Create LLM request
 		req := &MessageRequest{
@@ -317,7 +331,7 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 		}
 
 		// Use streaming API
-		streamChan, err := a.provider.CreateMessageStream(ctx, req)
+		streamChan, err := a.createStreamWithRetry(ctx, req, callback)
 		if err != nil {
 			a.consecutiveMistakes++
 			callback.OnError(err)
@@ -541,7 +555,7 @@ func (a *BaseAgent) SetWorkingDir(dir string) {
 // conversation budget and, if so, triggers compaction. It estimates tokens
 // for the system prompt and the JSON-serialized tool descriptions because
 // those are also sent to the provider.
-func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string, availableTools []tools.Tool) {
+func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string, availableTools []tools.Tool, callback StreamCallback) {
 	conv := a.conversation
 	if conv.MaxTokens <= 0 {
 		return
@@ -573,10 +587,17 @@ func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string,
 		return
 	}
 
+	reason := fmt.Sprintf("token budget %d/%d (60%% threshold)", total, budget)
 	logInfof("Token budget at %d/%d; triggering compaction", total, conv.MaxTokens)
+	if callback != nil {
+		callback.OnCompactionStart(reason)
+	}
 	conv.AutoCompact()
 
 	if conv.GetTotalTokens() > budget*8/10 {
 		conv.TrimToMaxTokens()
+	}
+	if callback != nil {
+		callback.OnCompactionEnd(fmt.Sprintf("compaction complete: %d tokens remaining", conv.GetTotalTokens()))
 	}
 }
