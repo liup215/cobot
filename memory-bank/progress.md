@@ -62,6 +62,8 @@
 
 **M2 完成（loop 三段拆分 + ToolGuard + 自动重试 + 全部 Callback 事件，
 18 个行为测试 `-race -count=2` 绿；提交 43b31b2 + 654a4db）。**
+§10 手术单清退完成：prompts 僵尸工具目录/Skills 段、types/skill_meta.go、
+tools ToolBehavior 系与 init.go 旁路 API 全部删除（净 -272 行）。
 下一步 M3：Anthropic 适配器（新写，httptest 逐事件断言）。
 
 ## Known Issues / 风险
