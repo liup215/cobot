@@ -20,10 +20,10 @@
 - [x] provider/ 接口层（Provider/StreamChunk/Request/Response，源自 internal/agent/provider.go）
 - [x] provider/ openai 兼容（移植，SSE + tool_calls 增量聚合 + reasoning_content 透传）
 - [x] provider/ mock（场景化回放）+ registry（工厂注册表，ProviderConfig 复用接口层定义）
-- [x] provider/ 验收：`go list -m all` 无第三方；6 单测 -race 全绿；无不可见字符
-- [ ] tools/ Tool/Registry + 六件套 + attempt_completion(+ask_followup)
-- [ ] tools/ XML 兜底解析（移植 + 测试）
-- [ ] 验收：gline 相关单测移植通过
+- [x] tools/ Tool/Registry + 六件套 + attempt_completion/ask_followup/plan_mode_respond
+- [x] tools/ XML 兜底解析（tools/xml_fallback.go，签名去 provider 依赖）
+- [x] 验收：`go list -m all` 无第三方；单测移植通过（-race 全绿，tools 包
+      file/search/xml 测试 + 注册 Smoke 9 工具）
 
 ### M2 loop 重构
 - [ ] agent.go 1173 行拆分：主循环 / 流处理 / 工具执行（先固化行为基线测试）
@@ -53,8 +53,8 @@
 
 ## Current Status
 
-**M1 进行中（types + provider 完成，剩 tools/）**。provider 迁移验证了
-cp+sed 复制流程可行且干净，tools 迁移照此执行。
+**M1 完成（types + provider + tools 全部就位，零依赖，-race 全绿）。**
+下一步 M2：loop 重构（行为基线测试 → agent.go 三段拆分 → ToolGuard/重试/Store）。
 
 ## Known Issues / 风险
 
@@ -75,3 +75,5 @@ cp+sed 复制流程可行且干净，tools 迁移照此执行。
 | 2026-08-28 | 仓库提前推送（原计划 M5 后） | 用户指令「直接先推送到 github」；v0.1.0 tag/release 仍留到 M5 |
 | 2026-08-28 | 迁移流程定为 cp+sed 字节级复制，禁止 write 重写 | write 重写 provider 文件反复引入不可见字符；cp+sed 零风险且语义零改动 |
 | 2026-08-28 | provider 双 ToolCall 并存（provider.ToolCall string 版 / types.ToolCall RawMessage 版） | 与 gline 语义一致，M2 loop 拆分时再统一归口 |
+| 2026-08-28 | xml_fallback 签名改为 (content, toolNames []string) → []types.ToolCall | 避免 tools→provider 反向依赖；RawMessage 版 ToolCall 反而更自然 |
+| 2026-08-28 | list_code_definition_names 实现保留但 InitDefaultRegistry 不注册 | 手术清单未列剔除；M4 工具行为定稿时再决去留 |

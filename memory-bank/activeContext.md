@@ -2,11 +2,20 @@
 
 ## 当前工作焦点
 
-**M1 骨架迁移**——types 与 provider 已完成，接下来是 tools/ 六件套 +
-XML 兜底。
+**M1 骨架迁移已完成（types + provider + tools 全部落地）**，接下来进入
+**M2：loop 重构**——把 gline 1173 行 agent.go 拆为主循环/流处理/工具执行三段。
 
 ## 近期变更
 
+- 2026-08-28：**tools 包迁移完成（commit da55106）**：
+  - tool.go/registry.go/file.go/command.go/search.go/interaction.go 均为
+    cp 字节级复制 + 仅 gofmt 对齐；file/search 测试 0 语义差异。
+  - init.go 裁剪为 v1 九件套注册（六件套 + ask_followup/plan_mode_respond/
+    attempt_completion）；剔除 memory/summarizer/browser/web_fetch/use_skill。
+  - list_code_definition_names 实现保留但未注册（手术清单未列剔除，M4 定去留）。
+  - xml_fallback.go(+test)：签名改为 `ParseXMLToolCalls(content, toolNames []string)
+    []types.ToolCall`，避免 tools→provider 反向依赖；log 内联 slog。
+  - Smoke 验证：InitDefaultRegistry 注册 9 工具无重复，plan/act 过滤正常。
 - 2026-08-28：**provider 包迁移完成（commit 477b224）**。采用“cp 字节级复制
   + sed 仅改包名/路径/前缀”的流程，彻底避免 write 重写引入不可见字符：
   - provider/provider.go（接口层，源 gline internal/agent/provider.go）
@@ -24,14 +33,14 @@ write 创建 provider 文件反复出现特殊不可见字符导致失败。
 
 ## 下一步（按里程碑顺序）
 
-1. **M1 剩余**：tools/ —— `gline/internal/tools/`（tool.go/registry.go/
-   init.go 及六件套实现，同样用 cp+sed 流程）+ `xml_tools.go` 兜底解析。
-2. **M2**：`gline/internal/agent/agent.go`（1173 行）拆分重构为
-   主循环/流处理/工具执行三段，先固化行为基线测试再动手。
-3. **M3**：新写 Anthropic 适配器（参照 pi 的 anthropic-messages.ts 移植；
+1. **M2 loop 重构**：先用 mock provider 固化行为基线测试（终结协议/
+   纠错环/预派发），再把 `gline/internal/agent/agent.go`（1173 行）拆为
+   主循环/流处理/工具执行三段；ToolGuard（两挂点 + ErrAbortRun）、
+   自动重试、Store 接口。同样遵循 cp+sed 复制流程。
+2. **M3**：新写 Anthropic 适配器（参照 pi 的 anthropic-messages.ts 移植；
    可直接拷贝 provider/openai.go 作为骨架再改事件解析）。
-4. **M4**：compact 双策略 + 工具集裁剪定稿。
-5. **M5**：examples + README 中英 + Maestro embedded 后端接入验证 →
+3. **M4**：compact 双策略 + 工具集裁剪定稿（含 list_code_definition_names 去留）。
+4. **M5**：examples + README 中英 + Maestro embedded 后端接入验证 →
    发 v0.1.0（仓库已存在，此步只剩打 tag 与 release）。
 
 ## 活跃决策
