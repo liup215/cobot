@@ -1,9 +1,9 @@
-package agentcore
+package cobot
 
 import (
-	"github.com/liup215/agentcore/loop"
-	"github.com/liup215/agentcore/provider"
-	"github.com/liup215/agentcore/tools"
+	"github.com/liup215/cobot/loop"
+	"github.com/liup215/cobot/provider"
+	"github.com/liup215/cobot/tools"
 )
 
 // Re-exported component types so callers can implement the agent's hooks

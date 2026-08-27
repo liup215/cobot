@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/liup215/agentcore/prompts"
-	"github.com/liup215/agentcore/provider"
-	"github.com/liup215/agentcore/tools"
-	"github.com/liup215/agentcore/types"
+	"github.com/liup215/cobot/prompts"
+	"github.com/liup215/cobot/provider"
+	"github.com/liup215/cobot/tools"
+	"github.com/liup215/cobot/types"
 )
 
 // Provider-layer type aliases so the loop code (and its callers) can use

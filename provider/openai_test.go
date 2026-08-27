@@ -3,7 +3,7 @@ package provider
 import (
 	"testing"
 
-	"github.com/liup215/agentcore/types"
+	"github.com/liup215/cobot/types"
 )
 
 func TestNewOpenAIProvider(t *testing.T) {

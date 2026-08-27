@@ -3,7 +3,7 @@ package loop
 import (
 	"encoding/json"
 
-	"github.com/liup215/agentcore/types"
+	"github.com/liup215/cobot/types"
 )
 
 // Store is the optional persistence sink for a task run. It is the

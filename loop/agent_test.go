@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/liup215/agentcore/provider"
-	"github.com/liup215/agentcore/tools"
-	"github.com/liup215/agentcore/types"
+	"github.com/liup215/cobot/provider"
+	"github.com/liup215/cobot/tools"
+	"github.com/liup215/cobot/types"
 )
 
 // ─── test helpers ────────────────────────────────────────────────────────────

@@ -19,15 +19,15 @@
 // corresponding component via Config; the underlying packages
 // (loop, provider, tools, types, prompts) remain fully accessible for
 // advanced composition.
-package agentcore
+package cobot
 
 import (
 	"fmt"
 	"time"
 
-	"github.com/liup215/agentcore/loop"
-	"github.com/liup215/agentcore/provider"
-	"github.com/liup215/agentcore/tools"
+	"github.com/liup215/cobot/loop"
+	"github.com/liup215/cobot/provider"
+	"github.com/liup215/cobot/tools"
 )
 
 // Agent is the runnable agent. It is an alias of loop.BaseAgent, so all

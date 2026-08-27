@@ -1,4 +1,4 @@
-package agentcore_test
+package cobot_test
 
 import (
 	"context"
@@ -7,14 +7,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/liup215/agentcore"
-	"github.com/liup215/agentcore/provider"
-	"github.com/liup215/agentcore/tools"
+	"github.com/liup215/cobot"
+	"github.com/liup215/cobot/provider"
+	"github.com/liup215/cobot/tools"
 )
 
 // recordingCB captures events for assertions (single-threaded tests).
 type recordingCB struct {
-	agentcore.CallbackAdapter
+	cobot.CallbackAdapter
 	contents    []string
 	completions []string
 	starts      []string
@@ -51,9 +51,9 @@ func TestNewAgentEndToEnd(t *testing.T) {
 	)
 	cb := &recordingCB{}
 
-	agent, err := agentcore.NewAgent(agentcore.Config{
+	agent, err := cobot.NewAgent(cobot.Config{
 		Provider: scripted,
-		Mode:     agentcore.ModeAct,
+		Mode:     cobot.ModeAct,
 		Title:    "facade smoke",
 	})
 	if err != nil {
@@ -75,7 +75,7 @@ func TestNewAgentEndToEnd(t *testing.T) {
 
 // Omitted Tools defaults to the built-in registry (nine tools registered).
 func TestNewAgentDefaultRegistry(t *testing.T) {
-	agent, err := agentcore.NewAgent(agentcore.Config{
+	agent, err := cobot.NewAgent(cobot.Config{
 		Provider: provider.NewScriptedProvider(provider.TurnScript{Content: "hi"}),
 	})
 	if err != nil {
@@ -91,7 +91,7 @@ func TestNewAgentDefaultRegistry(t *testing.T) {
 
 // APIKey-less, provider-less configs are rejected with a clear error.
 func TestNewAgentRequiresCredentials(t *testing.T) {
-	_, err := agentcore.NewAgent(agentcore.Config{})
+	_, err := cobot.NewAgent(cobot.Config{})
 	if err == nil || !strings.Contains(err.Error(), "APIKey") {
 		t.Fatalf("want APIKey error, got %v", err)
 	}
@@ -103,7 +103,7 @@ func TestNewAgentCustomRegistry(t *testing.T) {
 	reg.Register(&tools.ToolInfo{Tool: &echoTool{}, AllowedModes: []string{"act"}})
 	reg.Register(&tools.ToolInfo{Tool: tools.NewAttemptCompletionTool(), AllowedModes: []string{"act"}})
 
-	agent, err := agentcore.NewAgent(agentcore.Config{
+	agent, err := cobot.NewAgent(cobot.Config{
 		Provider: provider.NewScriptedProvider(completionScript("done")),
 		Tools:    reg,
 	})
@@ -121,13 +121,13 @@ func TestNewAgentCustomRegistry(t *testing.T) {
 // ErrAbortRun re-export is the same sentinel the loop checks for.
 func TestErrAbortRunSentinel(t *testing.T) {
 	wrapped := errors.New("policy: " + "x")
-	if !errors.Is(agentcore.ErrAbortRun, agentcore.ErrAbortRun) {
+	if !errors.Is(cobot.ErrAbortRun, cobot.ErrAbortRun) {
 		t.Fatal("sentinel broken")
 	}
 	_ = wrapped
 }
 
-// echoTool implements agentcore.Tool via the tools package.
+// echoTool implements cobot.Tool via the tools package.
 type echoTool struct{}
 
 func (e *echoTool) Name() string { return "echo" }

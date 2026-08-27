@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/liup215/agentcore/tools"
-	"github.com/liup215/agentcore/types"
+	"github.com/liup215/cobot/tools"
+	"github.com/liup215/cobot/types"
 )
 
 // executeToolCalls runs the tool calls attached to the last assistant

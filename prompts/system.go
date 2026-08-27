@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/liup215/agentcore/types"
+	"github.com/liup215/cobot/types"
 )
 
 // GetSystemPrompt returns the appropriate system prompt for the given mode.

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/liup215/agentcore/types"
+	"github.com/liup215/cobot/types"
 )
 
 const (

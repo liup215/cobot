@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/liup215/agentcore/types"
+	"github.com/liup215/cobot/types"
 )
 
 // isKnownToolName reports whether name is in toolNames.

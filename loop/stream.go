@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/liup215/agentcore/prompts"
-	"github.com/liup215/agentcore/tools"
-	"github.com/liup215/agentcore/types"
+	"github.com/liup215/cobot/prompts"
+	"github.com/liup215/cobot/tools"
+	"github.com/liup215/cobot/types"
 )
 
 // processStream handles the streaming response from the LLM

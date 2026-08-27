@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/liup215/agentcore/provider"
+	"github.com/liup215/cobot/provider"
 )
 
 // DefaultRetryDelays is the default exponential backoff schedule: each

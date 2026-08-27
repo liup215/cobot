@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/liup215/agentcore/types"
+	"github.com/liup215/cobot/types"
 )
 
 // newStreamTestProvider returns an OpenAI provider pointed at the test server.
