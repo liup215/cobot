@@ -2,13 +2,34 @@
 
 ## 当前工作焦点
 
-**根包门面（facade）已落地（commit 5f6e6ca）**：用户反馈 loop.New 组装语义
-不清晰、想要单一 Config 入口。现公开入口 = `agentcore.NewAgent(Config)`，
-子包架构不变（门面纯语法糖，`Agent = loop.BaseAgent` 别名零包装）。
-M2 全部完成；下一步 **M3：Anthropic 适配器**。
+**M3 原生 Anthropic Messages 适配器完成**：provider/anthropic.go（传输+SSE
+流式）+ provider/anthropic_wire.go（wire 类型与双向映射），registry 注册
+"anthropic"，29 个 httptest 逐事件断言测试 `-race` 绿，覆盖率 95-100%。
+下一步 **M4：compaction（Trim 移植 + Summarize 新写）与工具行为定稿**。
 
 ## 近期变更
 
+- 2026-08-28：**M3 Anthropic 适配器完成**：
+  - provider/anthropic.go（~680 行）：NewAnthropicProvider（key 空则读
+    ANTHROPIC_API_KEY，默认模型 claude-sonnet-4-5，默认 baseURL
+    api.anthropic.com）、buildAnthropicURL（host//v1//v1/messages 三形态）、
+    post（x-api-key + anthropic-version: 2023-06-01）、checkAnthropicStatus
+    （错误信封 + Retry-After → HTTPError）、CreateMessage /
+    CreateMessageStream（同步建连非 200 → HTTPError，之后 goroutine 跑
+    pumpStream）、pumpStream（SSE 解析：空闲 120s 定时器 + 每读 30s 截止，
+    blocks map[index]*state 累积，message_stop/EOF 时统一 finish 单个
+    Done chunk）、finalizeUnclosedToolBlocks、convertAnthropicResponse、
+    mapAnthropicStopReason / mapAnthropicToolChoice。
+  - provider/anthropic_wire.go（~265 行）：请求/响应/SSE wire 类型 +
+    convertMessagesToAnthropic（system 归顶层、tool_result 归组 user 消息、
+    空消息剔除与占位）+ normalizeAnthropicToolInput。
+  - provider/registry.go：InitDefaultRegistry 注册 "anthropic"。
+  - 测试：anthropic_stream_test.go（18 个：纯文本/双工具/增量拼接/thinking/
+    零参/错误事件/stop_reason 矩阵/429+529+400/EOF/截断修复/未知事件/
+    畸形 SSE 容错/缺 id 跳过/不可修复 JSON 跳过/块起始自带 input/
+    error 无 payload/连接中断 hijack）+ anthropic_test.go（11 个：默认值/
+    缺 key/URL/请求形状逐字段/system cache_control/默认 schema/
+    非流式映射/非流式 429/网络错 Status 0/registry/映射边界）。
 - 2026-08-28：**根包门面完成（commit 5f6e6ca）**：
   - agentcore.go（根包）：`Config`（平铺全可选：APIKey/BaseURL/Model 派生
     openai provider；Tools nil=默认九件套；Mode/AutoApprove/MaxTokens/
@@ -64,16 +85,11 @@ M2 全部完成；下一步 **M3：Anthropic 适配器**。
 
 ## 下一步（按里程碑顺序）
 
-1. **M3 Anthropic 适配器**（provider/anthropic.go，新写）：
-   - 参照 pi 的 anthropic-messages.ts 移植 SSE 事件序
-     （message_start/content_block_start/delta/stop/message_delta/message_stop，
-     嵌套 tool_use 增量 JSON 拼接）；thinking 块 → ReasoningContent；
-     cache_control（system ephemeral）；stop_reason 映射；overloaded_error。
-   - 同步建连（照 openai.go 手术后的结构直接写对，非 2xx → HTTPError）。
-   - httptest 假 SSE 逐事件断言。
-2. **M4**：compact 双策略（Summarize 新写 + Trim 回退）+ 工具集定稿
-   （含 list_code_definition_names 去留）。
-3. **M5**：examples + README 中英 + Maestro embedded 验证 → tag v0.1.0。
+1. **M4 compaction 与工具集**：
+   - compact.Strategy 接口 + Trim（移植 gline）+ Summarize（新写，K=6 轮）。
+   - 默认组合：Summarize 失败回退 Trim。
+   - 工具行为定稿（截断/超时/大文件策略；list_code_definition_names 去留）。
+2. **M5**：examples + README 中英 + Maestro embedded 验证 → tag v0.1.0。
 
 ## 活跃决策
 
@@ -85,6 +101,15 @@ M2 全部完成；下一步 **M3：Anthropic 适配器**。
   流中错误；Options.RetryDelays 空 = 关闭。
 - **OnToolCallUpdate** 只在同步执行分支发（预派发复用路径不发，
   避免"已跑完还显示 running"的误导）。
+- **Anthropic thinking 不回传**：Messages API 要求 thinking 块与其加密
+  签名成对出现且仅在请求开启 thinking 时合法，内部 types.Message 不携带
+  签名 → convertMessagesToAnthropic 丢弃 ReasoningContent（v0.2 候选：
+  持久化签名）；响应侧 thinking → ReasoningContent 独立通道。
+- **Anthropic system 归顶层**：历史 RoleSystem 消息并入顶层 system 数组
+  （messages 内禁止 system 角色），ephemeral cache_control 打在最后一个
+  system 块（缓存以 marker 结尾的最长前缀）。
+- **Anthropic SSE 按 payload type 派发**：data 无 type 才回退 event: 行；
+  畸形/未知事件一律忽略不毒化流。
 - 仓库推送已提前完成；tag/release 留到 M5。
 
 ## 经验与洞察（来自调研）

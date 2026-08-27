@@ -103,6 +103,12 @@ func InitDefaultRegistry() {
 	RegisterDefault("openai", func(config ProviderConfig) (Provider, error) {
 		return NewOpenAIProvider(config.APIKey, config.Model, config.BaseURL), nil
 	})
+
+	// Register native Anthropic Messages provider (Claude models).
+	// An empty API key falls back to the ANTHROPIC_API_KEY env var.
+	RegisterDefault("anthropic", func(config ProviderConfig) (Provider, error) {
+		return NewAnthropicProvider(config.APIKey, config.Model, config.BaseURL), nil
+	})
 }
 
 // GetProvider creates a provider instance with the given configuration

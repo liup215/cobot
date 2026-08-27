@@ -61,10 +61,23 @@ loop ──► provider ──► types
 | 组件 | 依赖 | 产出 |
 |---|---|---|
 | types | stdlib | 消息/工具调用/token 估算 |
-| provider | types | openai(迁移) / anthropic(新写) / mock |
+| provider | types | openai(迁移) / anthropic(完成) / mock；errors.go HTTPError+RetryAfter |
 | tools | types | Tool/Registry、六件套、XML 兜底、ToolGuard 类型 |
 | loop | provider+tools+compact+types | 一次任务运行的完整生命周期与事件 |
 | compact | types(+provider 经接口) | Trim / Summarize 策略 |
+
+### provider 适配器共同结构（openai 与 anthropic 对齐）
+
+- **同步建连**：转换 → marshal → httpReq → client.Do → 状态码检查全部在
+  调用 goroutine 内；网络失败与非 2xx 返回 `*HTTPError`（loop 重试层据此
+  退避）。goroutine 仅负责 SSE 读取。
+- **流式输出契约**：文本/思考增量即时发 chunk；tool_call 先发 IsPartial
+  拷贝再发完整调用；整个流恰好一个 `Done` chunk 携带 FinishReason+Usage；
+  流中错误发 `{Error, Done:true}` chunk（走纠错环，不重试）。
+- **工具参数健壮性**：增量 JSON 拼接 → isValidJSON 校验 →
+  isCompleteJSONObject 括号修复（补 `}` 至多 10 字符）→ 仍失败则跳过并记日志。
+- **SSE 读取防护**：空闲 120s 定时器 + 每读 30s SetReadDeadline；EOF 后
+  flush 尾事件 + 收尾未闭合 tool_use 块 + 兜底 finish。
 
 ## 关键实现路径
 
