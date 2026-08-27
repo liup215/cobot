@@ -2,61 +2,82 @@
 
 ## 当前工作焦点
 
-**M1 骨架迁移已完成（types + provider + tools 全部落地）**，接下来进入
-**M2：loop 重构**——把 gline 1173 行 agent.go 拆为主循环/流处理/工具执行三段。
+**M2 loop 重构已全部完成（Step A `43b31b2` + Step B `654a4db`）**，主循环/
+流处理/工具执行三段拆分 + ToolGuard + 自动重试 + 新 Callback 事件全部落地，
+`-race -count=2` 全绿。下一步进入 **M3：Anthropic 适配器**。
 
 ## 近期变更
 
-- 2026-08-28：**tools 包迁移完成（commit da55106）**：
-  - tool.go/registry.go/file.go/command.go/search.go/interaction.go 均为
-    cp 字节级复制 + 仅 gofmt 对齐；file/search 测试 0 语义差异。
-  - init.go 裁剪为 v1 九件套注册（六件套 + ask_followup/plan_mode_respond/
-    attempt_completion）；剔除 memory/summarizer/browser/web_fetch/use_skill。
-  - list_code_definition_names 实现保留但未注册（手术清单未列剔除，M4 定去留）。
-  - xml_fallback.go(+test)：签名改为 `ParseXMLToolCalls(content, toolNames []string)
-    []types.ToolCall`，避免 tools→provider 反向依赖；log 内联 slog。
-  - Smoke 验证：InitDefaultRegistry 注册 9 工具无重复，plan/act 过滤正常。
-- 2026-08-28：**provider 包迁移完成（commit 477b224）**。采用“cp 字节级复制
-  + sed 仅改包名/路径/前缀”的流程，彻底避免 write 重写引入不可见字符：
-  - provider/provider.go（接口层，源 gline internal/agent/provider.go）
-  - provider/openai.go（SSE 流式，源 internal/api/openai.go；zerolog 23 处
-    调用改为 log/slog shim，见 provider/log.go）
-  - provider/mock.go、registry.go（registry 内重复 ProviderConfig 已删，
-    复用接口层定义）、openai_test.go（6 测试全绿，-race）
-  - gline 语义零改动；CRLF 已统一为 LF；perl 扫描确认无零宽/BOM 字符。
-- 2026-08-28：types 包迁移完成（message/conversation/token-estimator）。
-- 2026-08-28：仓库创建并推送 https://github.com/liup215/agentcore。
+- 2026-08-28：**M2 Step B 完成（commit 654a4db）**：
+  - provider/errors.go（新）：`HTTPError{Status, Message, RetryAfter, Err}` +
+    `Retryable()`（0 网络错/408/429/5xx 可重试，其余 4xx 不可）+
+    `parseRetryAfter`（秒制，上限 5min）+ AsHTTPError/IsRetryable。
+  - openai.go 手术：**连接建立移出 goroutine**（message 转换 → marshal →
+    httpReq → client.Do → 状态码检查全部同步），网络失败与非 2xx 直接
+    `return nil, &HTTPError{...}`（错误文案不变）；goroutine 仅剩 SSE 读取。
+  - loop/retry.go（新）：`createStreamWithRetry` 指数退避重试（默认
+    1s/2s/4s/8s，Retry-After 更长时优先），Options.RetryDelays 可配
+    （nil=默认、空切片=禁用）；每轮 `OnRetry(attempt, err, nextDelay)`。
+  - Callback 新事件：`OnToolCallUpdate`（同步执行前发 "running"）、
+    `OnCompactionStart/End`（主循环 trim 挂点 IsTokenAboveThreshold(100)
+    + enforceTokenBudget 60% 挂点，后者新增 callback 参数）、`OnRetry`。
+  - 测试：flakyProvider（前 N 次建流失败后委托 ScriptedProvider）+
+    httptest 假 SSE（成功流 + 429/503/400 同步错误矩阵）+ compaction 事件。
+- 2026-08-28：**M2 Step A 完成（commit 43b31b2）**：loop 包三段拆分、
+  ToolGuard、Store、12 个行为基线测试；修复 gline 两个固有 bug
+  （见下「行为修复记录」）。
+- 2026-08-28：M1 完成（types/provider/tools，commits 477b224、da55106）。
 
-**重要经验**：从 gline 迁移文件一律用 `cp` + 字节级 `sed`（包名、import
-路径、`agent.` 前缀、log 前缀），禁止用 write 工具重写源文件——之前用
-write 创建 provider 文件反复出现特殊不可见字符导致失败。
+**重要经验**：
+- 从 gline 迁移文件一律用 `cp` + 字节级 `sed`（包名、import、前缀），
+  禁止 write 重写迁移源文件——不可见字符问题反复出现。
+- **bash heredoc 追加大段 Go 代码不可靠**（长内容会被静默截断），新测试
+  追加用 `cat >>` 后必须立即检查尾部完整性；或者干脆用 write（测试文件
+  不受禁令限制）。
+- edit 工具偶尔把 edits 数组误序列化为字符串（报 "must be object"），
+  重试即可；跨文件多处修改必须拆成每文件一个 edit 调用。
+
+## 行为修复记录（相对 gline 基线，均有测试钉住）
+
+1. **`a.abort` 数据竞争**：`abort bool` → `atomic.Bool`（gline 中 defer
+   置 false 与预派发 goroutine 读取构成 race）。纯内存安全修复，零语义变化。
+2. **纠错环死循环（FR-L2）**：gline 在流创建后把 `consecutiveMistakes`
+   清零，导致"有工具不用"的纠正环永不终止。新规则：mistakes 仅在工具
+   成功执行后清零；不调工具的回复计入 3 次上限，达限返回
+   `max consecutive mistakes reached: model did not use a tool in %d consecutive turns`。
+3. **流建连失败消耗 mistake 配额（基线语义澄清）**：无重试时每轮主循环
+   建流失败计 1 次 mistake，3 轮达限终止；重试层只减少轮数，不改变该语义。
 
 ## 下一步（按里程碑顺序）
 
-1. **M2 loop 重构**：先用 mock provider 固化行为基线测试（终结协议/
-   纠错环/预派发），再把 `gline/internal/agent/agent.go`（1173 行）拆为
-   主循环/流处理/工具执行三段；ToolGuard（两挂点 + ErrAbortRun）、
-   自动重试、Store 接口。同样遵循 cp+sed 复制流程。
-2. **M3**：新写 Anthropic 适配器（参照 pi 的 anthropic-messages.ts 移植；
-   可直接拷贝 provider/openai.go 作为骨架再改事件解析）。
-3. **M4**：compact 双策略 + 工具集裁剪定稿（含 list_code_definition_names 去留）。
-4. **M5**：examples + README 中英 + Maestro embedded 后端接入验证 →
-   发 v0.1.0（仓库已存在，此步只剩打 tag 与 release）。
+1. **M3 Anthropic 适配器**（provider/anthropic.go，新写）：
+   - 参照 pi 的 anthropic-messages.ts 移植 SSE 事件序
+     （message_start/content_block_start/delta/stop/message_delta/message_stop，
+     嵌套 tool_use 增量 JSON 拼接）；thinking 块 → ReasoningContent；
+     cache_control（system ephemeral）；stop_reason 映射；overloaded_error。
+   - 同步建连（照 openai.go 手术后的结构直接写对，非 2xx → HTTPError）。
+   - httptest 假 SSE 逐事件断言。
+2. **M4**：compact 双策略（Summarize 新写 + Trim 回退）+ 工具集定稿
+   （含 list_code_definition_names 去留）。
+3. **M5**：examples + README 中英 + Maestro embedded 验证 → tag v0.1.0。
 
 ## 活跃决策
 
 - **模块路径** `github.com/liup215/agentcore`，仓库目录名 agent-core（本地）。
-- **零依赖硬约束**：go.mod require 仅 stdlib；日志用 log/slog（不迁移 zerolog）。
-- **提取基线冻结**：gline @ 2026-06-27；不在提取过程中顺手改进 gline 语义，
-  行为变更只做 requirements.md 列出的四项新增（Anthropic/ToolGuard/
-  Summarize compaction/自动重试）。
-- 仓库推送已按用户指令提前完成（原计划 M5 后）；tag/release 仍留到 M5。
+- **零依赖硬约束**：go.mod require 仅 stdlib；日志用 log/slog shim。
+- **提取基线冻结**：gline @ 2026-06-27；行为变更仅限上述三项修复 +
+  requirements.md 的四项新增（Anthropic/ToolGuard/Summarize/重试）。
+- **重试语义**：只重试同步建连失败（HTTPError.Retryable），永不重试
+  流中错误；Options.RetryDelays 空 = 关闭。
+- **OnToolCallUpdate** 只在同步执行分支发（预派发复用路径不发，
+  避免"已跑完还显示 running"的误导）。
+- 仓库推送已提前完成；tag/release 留到 M5。
 
 ## 经验与洞察（来自调研）
 
 - gline 的预派发（SSE 流期间并行跑只读工具）与三锁竞态防护是亮点，
-  务必原样保留并加 `-race` 回归测试。
-- `claude` CLI `-p` 模式必须经 stdin 传 prompt（位置参数会失败）——迁移到
-  进程内后此坑消失，但 Maestro runner 的 `--mcp-config`/workdir 逻辑要相应重审。
-- Anthropic 适配器的难点在 SSE 事件序（content_block_start/delta/stop 嵌套
-  tool_use 增量）与 stop_reason 映射，用 httptest 假 SSE 逐事件断言。
+  已原样保留并有 `-race` 回归测试（TestPreDispatchExecutesOnce）。
+- Anthropic 适配器难点在 SSE 事件序与 stop_reason 映射，
+  用 httptest 假 SSE 逐事件断言（openai_stream_test.go 已示范结构）。
+- Guard 测试必须放行 attempt_completion，否则 deny 环造成 O(n²)
+  token 估算假死（AutoCompact 本身无 bug）。
