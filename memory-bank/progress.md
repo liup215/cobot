@@ -5,14 +5,15 @@
 - [x] 三路线调研完成（pi RPC 子进程 / pi Go 移植 / gline 提取），选定 gline 提取（2026-08-28）
 - [x] 需求规格定稿：memory-bank/requirements.md（v0.1，含手术清单 §10 与里程碑 §7）
 - [x] Memory Bank 初始化（projectbrief/productContext/activeContext/systemPatterns/techContext/progress）
-- [x] gh 已确认登录（liup215）
+- [x] 仓库推送：github.com/liup215/agentcore（public，main，origin 已配置；gh 账号 liup215）
 
 ## What's Left to Build
 
 ### M0 仓库初始化
+- [x] git init（main）+ .gitignore + .gitattributes(LF) + 首次提交
+- [x] GitHub 仓库创建并推送（liup215/agentcore，public）
 - [ ] go mod init github.com/liup215/agentcore（go 1.25）
-- [ ] LICENSE (MIT)、.gitignore、README 骨架
-- [ ] 首次 git commit
+- [ ] LICENSE (MIT)
 
 ### M1 骨架迁移（零第三方依赖）
 - [ ] types/ 收编 gline pkg/types（剔除 render/slash，加 Estimator 注入）
@@ -45,11 +46,11 @@
 - [ ] examples：basic / streaming / custom-tool / guard（均可离线 go run）
 - [ ] README 中英 + godoc 清理
 - [ ] Maestro embedded 后端接入（runner 新后端与 claude/pi 并列）
-- [ ] 经用户确认：gh repo create + push + v0.1.0 release
+- [ ] v0.1.0 tag + `gh release create`（仓库已存在，仅剩打标发布）
 
 ## Current Status
 
-**预开发阶段（M0 未开始）**。需求与设计已冻结，可随时开工 M0。
+**预开发阶段（M0 剩余：go.mod + LICENSE）**。需求与设计已冻结，GitHub 托管已就绪，可随时开工。
 
 ## Known Issues / 风险
 
@@ -67,3 +68,4 @@
 | 2026-08-28 | 只新增四项能力：Anthropic 适配器 / ToolGuard / Summarize compaction / 自动重试 | pi 调研结论：headless 场景真正缺的只有这些 |
 | 2026-08-28 | 明确不做：TUI/extensions/会话树/OAuth/MCP/记忆/浏览器/编排/Skills | v0.2+ 候选，避免范围蔓延 |
 | 2026-08-28 | 需求文档纳入 memory bank 体系 | 用户指定的工作流 |
+| 2026-08-28 | 仓库提前推送（原计划 M5 后） | 用户指令「直接先推送到 github」；v0.1.0 tag/release 仍留到 M5 |

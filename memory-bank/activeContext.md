@@ -10,7 +10,9 @@ README 骨架，然后进入 M1 骨架迁移。
 - 2026-08-28：项目创建于 `C:/Users/22569/Documents/20-Projects/agent-core`。
   完成三路线调研（pi RPC 子进程 / pi Go 移植 / gline 提取），选定 gline 提取。
 - 2026-08-28：requirements.md 定稿（v0.1），纳入 memory bank 体系管理。
-- 用户指令：开发直接在本目录进行；完成后用 gh-cli 推到 GitHub（liup215）。
+- 2026-08-28：**仓库已创建并推送**：https://github.com/liup215/agentcore（public，
+  main 分支，origin 已配置）。注意：这只是仓库托管；v0.1.0 tag/release 仍按
+  里程碑 M5 完成后再发。
 
 ## 下一步（按里程碑顺序）
 
@@ -28,8 +30,8 @@ README 骨架，然后进入 M1 骨架迁移。
 4. **M3**：新写 Anthropic 适配器（参照 pi 的 anthropic-messages.ts 移植）。
 5. **M4**：compact 双策略 + 工具集裁剪定稿。
 6. **M5**：examples + README 中英 + Maestro embedded 后端接入验证 →
-   经用户确认后 `gh repo create liup215/agentcore --public --source . --push`
-   并发 v0.1.0。
+   发 v0.1.0（`git tag v0.1.0 && git push origin v0.1.0` + `gh release create`；
+   仓库已于 2026-08-28 创建，此步只剩打 tag 与 release）。
 
 ## 活跃决策
 
@@ -38,7 +40,7 @@ README 骨架，然后进入 M1 骨架迁移。
 - **提取基线冻结**：gline @ 2026-06-27；不在提取过程中顺手改进 gline 语义，
   行为变更只做 requirements.md 列出的四项新增（Anthropic/ToolGuard/
   Summarize compaction/自动重试）。
-- **发布须经用户确认**后才执行 gh repo create / push / release。
+- 仓库推送已按用户指令提前完成（原计划 M5 后）；tag/release 仍留到 M5。
 
 ## 经验与洞察（来自调研）
 
