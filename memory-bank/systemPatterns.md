@@ -1,4 +1,4 @@
-# System Patterns: agentcore
+# System Patterns: cobot
 
 ## 架构总览
 
@@ -6,7 +6,7 @@
 使用方（Maestro / gline / 示例）
       │ 组装
       ▼
-┌───────────────────── agentcore ─────────────────────┐
+┌───────────────────── cobot ─────────────────────┐
 │ loop/  主循环 ──► 流处理 ──► 工具执行（三段拆分）      │
 │   │            Callback 事件接口     │               │
 │   │  ToolGuard（审批门，两路径均挂）  │               │
@@ -29,7 +29,7 @@ loop ──► provider ──► types
 
 - 使用方 implements：`loop.Store`（持久化）、`loop.Callback`（事件消费）、
   `compact.Summarizer`（摘要实现）、自定义 `tools.Tool`。
-- agentcore 不 import 使用方；全部解耦通过接口。
+- cobot 不 import 使用方；全部解耦通过接口。
 
 ## 关键设计模式（继承自 gline/Cline 血统）
 

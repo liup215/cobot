@@ -1,9 +1,9 @@
-# Product Context: agentcore
+# Product Context: cobot
 
 ## 解决的问题
 
 1. **Maestro 的外部依赖链**：Worker/评审/需求发起等角色依赖 claude CLI
-   子进程（Node.js 运行时），部署与升级受制于外部工具链。agentcore 让
+   子进程（Node.js 运行时），部署与升级受制于外部工具链。cobot 让
    agent 执行回到进程内纯 Go。
 2. **gline 与 Maestro 的重复建设**：两者都需要"循环 + 工具 + provider +
    压缩"内核。提取为共享包后，gline（GUI 场景）与 Maestro（headless 场景）
@@ -25,7 +25,7 @@
    完成 / 错误，使用方据此渲染进度（Maestro 的事件流与 task progress）。
 3. **安全可控**：副作用工具（write/replace/execute）默认建议套 ToolGuard；
    工具结果可控截断；token 预算自动水位管理。
-4. **依赖零负担**：引 agentcore 不引入任何传递依赖，不影响宿主的 go.mod 卫生。
+4. **依赖零负担**：引 cobot 不引入任何传递依赖，不影响宿主的 go.mod 卫生。
 
 ## 与竞品/替代方案的差异
 

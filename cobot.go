@@ -1,10 +1,10 @@
-// Package agentcore is a pure-Go, zero-dependency agent SDK: assemble a
+// Package cobot is a pure-Go, zero-dependency agent SDK: assemble a
 // Config, hand it a task, and the agent runs the LLM tool loop to
 // completion ("attempt_completion" protocol).
 //
 // The quick path is a single Config and NewAgent:
 //
-//	agent, err := agentcore.NewAgent(agentcore.Config{
+//	agent, err := cobot.NewAgent(cobot.Config{
 //		APIKey:      "sk-...",
 //		Model:       "gpt-4o",
 //		AutoApprove: true,
@@ -91,6 +91,11 @@ type Config struct {
 	// CustomRules is extra text appended to the system prompt.
 	CustomRules string
 
+	// AgentName is the agent identity announced in the system prompt's
+	// role section ("You are <AgentName>, a highly skilled software
+	// engineer..."). Empty = "cobot".
+	AgentName string
+
 	// MaxTokens overrides the conversation context budget (0 = 128k).
 	MaxTokens int
 
@@ -119,7 +124,7 @@ func NewAgent(cfg Config) (*Agent, error) {
 	prov := cfg.Provider
 	if prov == nil {
 		if cfg.APIKey == "" {
-			return nil, fmt.Errorf("agentcore: Config.APIKey is required (or inject Config.Provider directly)")
+			return nil, fmt.Errorf("cobot: Config.APIKey is required (or inject Config.Provider directly)")
 		}
 		prov = provider.NewOpenAIProvider(cfg.APIKey, cfg.Model, cfg.BaseURL)
 	}
@@ -136,6 +141,7 @@ func NewAgent(cfg Config) (*Agent, error) {
 		AutoApprove:            cfg.AutoApprove,
 		MaxConsecutiveMistakes: cfg.MaxConsecutiveMistakes,
 		CustomRules:            cfg.CustomRules,
+		AgentName:              cfg.AgentName,
 		MaxTokens:              cfg.MaxTokens,
 		RetryDelays:            cfg.RetryDelays,
 		Guard:                  cfg.Guard,

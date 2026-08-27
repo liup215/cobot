@@ -1,4 +1,4 @@
-// Package types contains the shared data structures used across agentcore:
+// Package types contains the shared data structures used across cobot:
 // messages, tool calls, conversations and token estimation.
 //
 // The package has no dependencies outside the standard library.

@@ -2,6 +2,7 @@ package cobot
 
 import (
 	"github.com/liup215/cobot/loop"
+	"github.com/liup215/cobot/prompts"
 	"github.com/liup215/cobot/provider"
 	"github.com/liup215/cobot/tools"
 )
@@ -51,3 +52,7 @@ type Tool = tools.Tool
 
 // DefaultRetryDelays is the default connection-retry backoff schedule.
 var DefaultRetryDelays = loop.DefaultRetryDelays
+
+// DefaultAgentName is the agent identity used in the system prompt when
+// Config.AgentName is empty.
+const DefaultAgentName = prompts.DefaultAgentName

@@ -1,18 +1,20 @@
-# Progress: agentcore
+# Progress: cobot
 
 ## What Works
 
 - [x] 三路线调研完成（pi RPC 子进程 / pi Go 移植 / gline 提取），选定 gline 提取（2026-08-28）
 - [x] 需求规格定稿：memory-bank/requirements.md（v0.1，含手术清单 §10 与里程碑 §7）
 - [x] Memory Bank 初始化（projectbrief/productContext/activeContext/systemPatterns/techContext/progress）
-- [x] 仓库推送：github.com/liup215/agentcore（public，main，origin 已配置；gh 账号 liup215）
+- [x] 仓库推送：github.com/liup215/cobot（public，main，origin 已配置；gh 账号 liup215）
 - [x] go mod init（go 1.25）+ MIT LICENSE + .gitignore/.gitattributes
+- [x] 模块改名 agentcore → cobot（commit 726cdae）+ 改名清扫（README/
+      包注释/错误前缀/系统提示词身份 `Config.AgentName`，2026-08-28）
 
 ## What's Left to Build
 
 ### M0 仓库初始化 — 完成
 - [x] git init（main）+ 首次提交 + GitHub 推送
-- [x] go mod init github.com/liup215/agentcore（go 1.25）+ LICENSE (MIT)
+- [x] go mod init github.com/liup215/cobot（go 1.25）+ LICENSE (MIT)
 
 ### M1 骨架迁移（零第三方依赖）— 完成
 - [x] types/ 收编 gline pkg/types（剔除 render/slash，Estimator 注入）
@@ -61,7 +63,8 @@
 ## Current Status
 
 **M2 完成（loop 三段拆分 + ToolGuard + 自动重试 + 全部 Callback 事件，
-18 个行为测试 `-race -count=2` 绿；提交 43b31b2 + 654a4db）。**
+18 个行为测试 `-race -count=2` 绿；提交 43b31b2 + 654a4db）+ 根包门面
+（5f6e6ca）+ agentcore→cobot 改名清扫（726cdae 及后续清扫提交）完成。**
 下一步 M3：Anthropic 适配器（新写，httptest 逐事件断言）。
 
 ## Known Issues / 风险
@@ -87,3 +90,4 @@
 | 2026-08-28 | a.abort 改 atomic.Bool（修 gline race）；mistakes 清零时机改"工具成功后"（修 FR-L2 死循环） | 内存安全 + 需求 FR-L2；均有测试钉住，零其他语义变化 |
 | 2026-08-28 | 重试只覆盖同步建连失败；流中错误走纠错环 | Step B 设计定稿；流中重试会造成重复副作用 |
 | 2026-08-28 | OnToolCallUpdate 仅同步执行分支发 | 预派发复用时工具已完成，发 running 会误导 |
+| 2026-08-28 | 模块/仓库改名 agentcore → cobot（go.mod、import、README、包注释、错误前缀全量清扫），系统提示词 agent 身份提为 `Config.AgentName`（默认 "cobot"） | 项目更名与 GitHub 仓库一致；硬编码模型身份不利于复用方品牌化 |

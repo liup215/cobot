@@ -1,8 +1,8 @@
-# Project Brief: agentcore
+# Project Brief: cobot
 
 ## 一句话定位
 
-agentcore 是一个**纯 Go、零第三方运行时依赖**的 Agent SDK——从 gline
+cobot 是一个**纯 Go、零第三方运行时依赖**的 Agent SDK——从 gline
 （Cline 血统）的 `internal/agent` 内核提取重构而来，作为独立 GitHub 包发布，
 供 Maestro 等项目以进程内方式驱动 LLM agent 完成任务。
 
@@ -17,7 +17,7 @@ Go 原生、约 1.5-2.5 周，且 Cline 的"领任务→自主执行→attempt_c
 
 ## 核心需求（详细规格见 memory-bank/requirements.md）
 
-1. 从 gline 提取 agent 内核为独立 module `github.com/liup215/agentcore`。
+1. 从 gline 提取 agent 内核为独立 module `github.com/liup215/cobot`。
 2. 运行时依赖为 0（仅 stdlib），测试依赖也为 0。
 3. 新增原生 Anthropic Messages 适配器（流式 SSE + thinking + cache_control）。
 4. 新增 ToolGuard 审批门（PreToolUse 拦截）。
@@ -38,7 +38,7 @@ MCP client/server、记忆引擎、浏览器自动化、subagent 编排、Skills
 
 1. `go list -m all` 无任何第三方依赖；三平台 `go test -race ./...` 绿。
 2. Maestro `embedded` runner 跑通一次真实 demand 执行。
-3. v0.1.0 发布到 github.com/liup215/agentcore。
+3. v0.1.0 发布到 github.com/liup215/cobot。
 
 ## 关键约束
 

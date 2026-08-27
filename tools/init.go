@@ -1,6 +1,6 @@
 package tools
 
-// InitDefaultRegistry initializes a registry with the agentcore v1 built-in
+// InitDefaultRegistry initializes a registry with the cobot v1 built-in
 // tool set (six core tools + the three special interaction tools).
 func InitDefaultRegistry() *Registry {
 	registry := NewRegistry()

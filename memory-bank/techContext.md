@@ -1,20 +1,20 @@
-# Tech Context: agentcore
+# Tech Context: cobot
 
 ## 技术栈
 
 - **语言**：Go 1.25（兼容 maestro 的 1.26）
 - **依赖**：运行时仅 stdlib；测试仅 stdlib（testing/httptest）；
   日志 `log/slog`；无 CGO
-- **模块**：`github.com/liup215/agentcore`
+- **模块**：`github.com/liup215/cobot`
 - **License**：MIT
 
 ## 提取源（只读基线）
 
 - gline 仓库：`C:/Users/22569/Documents/20-Projects/gline`
 - 基线快照：2026-06-27，commit `fix-replace-in-file-errors`
-- 源文件映射（gline → agentcore）：
+- 源文件映射（gline → cobot）：
 
-| gline 源 | agentcore 去向 | 处置 |
+| gline 源 | cobot 去向 | 处置 |
 |---|---|---|
 | pkg/types/message.go 等 | types/ | 收编，剔除 render_strategy/slash |
 | internal/api/openai.go | provider/openai.go | 移植（stdlib 化） |
@@ -30,7 +30,7 @@
 ## 本地开发
 
 ```bash
-cd C:/Users/22569/Documents/20-Projects/agent-core
+cd C:/Users/22569/Documents/20-Projects/cobot
 go build ./...          # M0 起必须通过
 go vet ./...
 go test -race ./...     # 全部单测不得依赖真实网络
@@ -42,7 +42,7 @@ go test -race ./...     # 全部单测不得依赖真实网络
 ## 发布（M5，经用户确认后执行）
 
 ```bash
-gh repo create liup215/agentcore --public --source . --push \
+gh repo create liup215/cobot --public --source . --push \
   --description "Pure-Go agent SDK extracted from gline"
 git tag v0.1.0 && git push origin v0.1.0
 gh release create v0.1.0 --title "v0.1.0" --notes "..."

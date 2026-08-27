@@ -1,19 +1,21 @@
-# agentcore 需求文档（v0.1）
+# cobot 需求文档（v0.1）
 
 > 状态：已评审待开发
 > 决策日期：2026-08-28
-> 本文档是 agentcore 的唯一需求来源（Source of Truth）。开发前必读。
+> 本文档是 cobot 的唯一需求来源（Source of Truth）。开发前必读。
+> 修订：2026-08-28 项目由 agentcore 更名为 cobot（module/仓库/文档，commit 726cdae），
+> 本文模块路径与仓库目录已同步更新。
 
 ---
 
 ## 1. 项目定位
 
-**agentcore** 是一个**纯 Go、零第三方运行时依赖**的 Agent SDK，从 gline
+**cobot** 是一个**纯 Go、零第三方运行时依赖**的 Agent SDK，从 gline
 （`C:/Users/22569/Documents/20-Projects/gline`，Cline 血统）的
 `internal/agent` 模块提取重构而来，发布为独立 GitHub 包：
 
-- 模块路径：`github.com/liup215/agentcore`
-- 仓库目录：`C:/Users/22569/Documents/20-Projects/agent-core`
+- 模块路径：`github.com/liup215/cobot`
+- 仓库目录：`C:/Users/22569/Documents/20-Projects/cobot`
 - License：MIT
 - Go 版本：go 1.25（向上兼容 maestro 的 1.26）
 
@@ -30,7 +32,7 @@ Go agent 驱动。
 |---|---|
 | pi agent（TS）RPC 子进程 | 体验好但保留外部运行时依赖，违背纯 Go 目标 |
 | 移植 pi 到 Go | MIT 允许，但 Tier-1 需 6-10k LOC、1-2 个月，且追着上游跑 |
-| **提取 gline agent → agentcore（选定）** | 代码自有（MIT）、Go 原生、约 1.5-2.5 周；Cline 的"领任务→自主执行→attempt_completion 交付"哲学与 Maestro Worker 场景天然匹配 |
+| **提取 gline agent → cobot（选定）** | 代码自有（MIT）、Go 原生、约 1.5-2.5 周；Cline 的"领任务→自主执行→attempt_completion 交付"哲学与 Maestro Worker 场景天然匹配 |
 
 ### 1.2 与 gline / pi 的设计哲学关系
 
@@ -54,7 +56,7 @@ Go agent 驱动。
 4. 提供 PreToolUse 审批门（ToolGuard），供 Maestro 实现人工审批/策略拦截。
 5. 提供 LLM 摘要式 compaction 策略（可选，与水位线裁剪并存）。
 6. 提供流式请求失败自动重试（指数退避 + Retry-After）。
-7. 发布 v0.1.0 到 github.com/liup215/agentcore，Maestro 以 embedded 后端接入。
+7. 发布 v0.1.0 到 github.com/liup215/cobot，Maestro 以 embedded 后端接入。
 
 ### 2.2 非目标（明确不做）
 
@@ -62,7 +64,7 @@ Go agent 驱动。
 - ❌ extensions 动态加载系统（TS/进程内插件）
 - ❌ 会话树与分支（session JSONL trees）
 - ❌ OAuth 订阅认证（Claude/Codex 订阅登录）——v0.1 只做 API Key
-- ❌ MCP client / server（Maestro 已有自己的 MCP server；agentcore 工具是原生 Go 注册）
+- ❌ MCP client / server（Maestro 已有自己的 MCP server；cobot 工具是原生 Go 注册）
 - ❌ 记忆引擎（facts/RAG）、浏览器自动化（go-rod）、Excel/网页抓取工具
 - ❌ 多 agent 编排 / subagents（Maestro 自己就是编排层）
 - ❌ Skills 系统（Maestro 用自己的角色提示词体系）
@@ -74,7 +76,7 @@ Go agent 驱动。
 ## 3. 架构与包结构
 
 ```
-github.com/liup215/agentcore
+github.com/liup215/cobot
 ├── types/        # Message / ToolCall / TokenUsage / Conversation（收编 gline pkg/types，裁剪）
 ├── provider/     # Provider 接口 + StreamChunk + openai 兼容实现(迁移) + anthropic 实现(新写) + mock
 ├── tools/        # Tool / Registry 接口层 + v1 内置工具 + ToolGuard
@@ -94,7 +96,7 @@ loop ──► provider ──► types
 
 **依赖政策（硬性约束）**：
 
-- `agentcore` 根模块 go.mod 的 `require` 中**不得出现任何第三方运行时依赖**（仅 stdlib）。
+- `cobot` 根模块 go.mod 的 `require` 中**不得出现任何第三方运行时依赖**（仅 stdlib）。
 - 日志统一走 `log/slog`（gline 的 zerolog 不迁移）。
 - 持久化不落依赖：`loop` 只定义 `Store` 接口，SQLite 等实现由使用方（Maestro/gline）提供。
 - 无 CGO；Windows / Linux / macOS 三平台可编译、可测试（`go test ./...`）。
@@ -292,7 +294,7 @@ type Strategy interface {
 
 | 里程碑 | 内容 | 验收标准 |
 |---|---|---|
-| **M0 仓库初始化** | go.mod（module github.com/liup215/agentcore, go 1.25）、LICENSE(MIT)、.gitignore、README 骨架 | `go build ./...` 通过 |
+| **M0 仓库初始化** | go.mod（module github.com/liup215/cobot, go 1.25）、LICENSE(MIT)、.gitignore、README 骨架 | `go build ./...` 通过 |
 | **M1 骨架迁移** | types/ + tools 接口层 + provider 接口层 + openai provider + mock provider；剔除 go-rod/excelize/zerolog/viper 等一切外部依赖 | `go list -m all` 无第三方包；gline 相关单测移植通过 |
 | **M2 loop 重构** | RunWithCallback 拆分主循环/流处理/工具执行；ToolGuard；自动重试 | 单测覆盖终结协议/纠错环/预派发/guard 拒绝；`-race` 绿 |
 | **M3 Anthropic 适配器** | SSE 流式 + thinking + cache_control + stop_reason 映射 + 重试集成 | httptest 假 SSE 全分支测试通过 |
@@ -305,7 +307,7 @@ type Strategy interface {
 
 ```bash
 # 首次（M5 完成后，经用户确认再执行）
-gh repo create liup215/agentcore --public --source . --push --description "Pure-Go agent SDK extracted from gline"
+gh repo create liup215/cobot --public --source . --push --description "Pure-Go agent SDK extracted from gline"
 git tag v0.1.0 && git push origin v0.1.0
 gh release create v0.1.0 --title "v0.1.0" --notes "..."
 # 后续版本：常规 git push + tag + gh release create
@@ -324,7 +326,7 @@ gh release create v0.1.0 --title "v0.1.0" --notes "..."
 | 1173 行单体拆分引入回归 | 拆分前先固化行为基线测试（用 mock provider 锁定现有行为），再动手 |
 | Anthropic 适配器无真实 API 覆盖 | httptest 假 SSE 逐事件断言；联调由 Maestro 集成阶段补真实调用验证 |
 | 预派发竞态 | 三锁结构原样保留 + `-race` 回归；副作用工具白名单默认关闭预派发 |
-| 模块路径未来迁移 | v0 期间允许；v1.0 前冻结为 github.com/liup215/agentcore |
+| 模块路径未来迁移 | v0 期间允许；v1.0 前冻结为 github.com/liup215/cobot |
 
 ---
 
