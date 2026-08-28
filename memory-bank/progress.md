@@ -44,13 +44,27 @@
       OnRetry（Adapter no-op；trim 与 60% 双挂点；同步执行分支才发 update）
 - [x] 验收：18 loop 测试 + httptest SSE 错误矩阵，`-race -count=2` 全绿
 
-### M3 Anthropic 适配器
-- [ ] provider/anthropic.go（新写，参照 pi anthropic-messages.ts）
-- [ ] SSE 流式（message_*/content_block_* 全事件，tool_use 增量 JSON 拼接）
-- [ ] thinking 块 → ReasoningContent 通道
-- [ ] cache_control（system ephemeral）+ stop_reason 映射
-- [ ] Retry-After / overloaded_error → HTTPError（同步建连）
-- [ ] 验收：httptest 假 SSE 全分支测试
+### M3 Anthropic 适配器 — 完成
+- [x] provider/anthropic.go（传输+流式）+ provider/anthropic_wire.go（wire 类型与
+      双向映射；拆两文件守住 ~400 行规模约束）
+- [x] SSE 全事件解析：message_start / content_block_start /
+      content_block_delta（text_delta/thinking_delta/signature_delta/
+      input_json_delta）/ content_block_stop / message_delta / message_stop /
+      ping / error；按 payload type 派发（event: 行兜底，代理剥离 event 行仍可解析）
+- [x] tool_use 增量 JSON 按 index 拼接，content_block_stop 时解析为 ToolCall
+      （复用 isValidJSON/isCompleteJSONObject 括号修复；零参工具取
+      content_block_start 内置 input；EOF 截断 best-effort 收尾）
+- [x] thinking 块 → ReasoningContent 独立通道（请求侧不回传，见决策表）
+- [x] system 顶层块 + ephemeral cache_control（打在最后一个 system 块）；
+      tools → input_schema；tool_choice auto/any；tool_result 归组进 user 消息
+- [x] stop_reason 映射 end_turn/stop_sequence→stop、tool_use→tool_calls、
+      max_tokens→length、未知透传；tool_use 时工具调用保证完整可用（有测试）
+- [x] 错误处理：同步建连非 200 → provider.HTTPError（含 Retry-After、
+      overloaded_error/529 可重试）；流中 error 事件 → 流错误通道走纠错环
+- [x] registry 注册 "anthropic"（ANTHROPIC_API_KEY 环境变量兜底）
+- [x] 验收：29 个 Anthropic 测试（httptest 假 SSE 逐事件断言 18 +
+      请求形状/映射 11），anthropic.go/wire.go 函数覆盖率 95-100%，
+      `go test ./... -race` 全绿
 
 ### M4 compaction 与工具集
 - [x] 工具集定稿之一：list_code_definition_names **保留并注册**进默认 Registry
@@ -72,7 +86,10 @@
 18 个行为测试 `-race -count=2` 绿；提交 43b31b2 + 654a4db）。**
 §10 手术单清退完成：prompts 僵尸工具目录/Skills 段、types/skill_meta.go、
 tools ToolBehavior 系与 init.go 旁路 API 全部删除（净 -272 行）。
-下一步 M3：Anthropic 适配器（新写，httptest 逐事件断言）。
+**M3 完成（原生 Anthropic Messages 适配器：SSE 全事件 + thinking 独立通道 +
+cache_control + stop_reason 映射 + HTTPError/Retry-After；29 个测试
+`-race` 绿，provider 覆盖率 95-100%，零第三方依赖）。**
+下一步 M4：compaction（Trim 移植 + Summarize 新写）与工具行为定稿。
 
 ## Known Issues / 风险
 
@@ -99,3 +116,8 @@ tools ToolBehavior 系与 init.go 旁路 API 全部删除（净 -272 行）。
 | 2026-08-28 | OnToolCallUpdate 仅同步执行分支发 | 预派发复用时工具已完成，发 running 会误导 |
 | 2026-08-28 | list_code_definition_names 定稿：注册进默认 Registry（plan/act、CategoryCode、无需确认）而非删除提示词 | 工具已完整实现（含 30s 列表缓存）、只读、可安全预派发；提示词 CAPABILITIES 段本就推荐该工作流（environment_details → 定义概览 → read_file → 编辑） |
 | 2026-08-28 | 提示词与工具集的一致性用测试钉死（prose 提及 ⊆ Registry；AVAILABLE TOOLS ⊆ 当前模式；静态目录 = Registry 三集合） | 提示词是自由文本，无结构约束；只有测试能防再次漂移 |
+| 2026-08-28 | Anthropic 适配器拆 anthropic.go（传输/流式）+ anthropic_wire.go（wire 类型/映射） | 单文件 ~700 行超出 NFR-3 规模约束；任务点名 anthropic.go 仍保留 |
+| 2026-08-28 | thinking（ReasoningContent）请求侧不回传 Anthropic | Messages API 要求 thinking 块与其加密签名成对回传且仅在开启 thinking 时合法，内部 Message 类型不携带签名；丢弃是唯一安全行为（v0.2 候选：持久化签名） |
+| 2026-08-28 | ephemeral cache_control 打在最后一个 system 块 | Anthropic 缓存"以 marker 结尾的最长前缀"；SystemPrompt 与历史 system 消息合并进顶层 system 数组（messages 内禁止 system 角色） |
+| 2026-08-28 | SSE 按 payload 的 type 字段派发，event: 行兜底 | 代理/网关可能剥离 event 行；data 无 type 时才回退 |
+| 2026-08-28 | SSE 解析复用 openai.go 的 isValidJSON/isCompleteJSONObject 括号修复与 partial-chunk 语义 | 两个 provider 行为一致，loop 无需区分 |
