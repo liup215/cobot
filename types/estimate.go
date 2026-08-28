@@ -6,7 +6,7 @@ import "unicode/utf8"
 type TokenEstimator func(s string) int
 
 // Estimator is the package-level token estimator used by Conversation and
-// every token-budget calculation in agentcore. It defaults to
+// every token-budget calculation in cobot. It defaults to
 // HeuristicEstimator; callers may replace it with a model-specific exact
 // counter (e.g. a bundled tokenizer) before running an agent.
 //

@@ -1,23 +1,27 @@
-# Progress: agentcore
+# Progress: cobot
 
 ## What Works
 
 - [x] 三路线调研完成（pi RPC 子进程 / pi Go 移植 / gline 提取），选定 gline 提取（2026-08-28）
 - [x] 需求规格定稿：memory-bank/requirements.md（v0.1，含手术清单 §10 与里程碑 §7）
 - [x] Memory Bank 初始化（projectbrief/productContext/activeContext/systemPatterns/techContext/progress）
-- [x] 仓库推送：github.com/liup215/agentcore（public，main，origin 已配置；gh 账号 liup215）
+- [x] 仓库推送：github.com/liup215/cobot（public，main，origin 已配置；gh 账号 liup215）
 - [x] go mod init（go 1.25）+ MIT LICENSE + .gitignore/.gitattributes
 - [x] 提示词↔工具集守卫测试（2026-08-28）：loop/prompt_guard_test.go 断言
       系统提示词中出现的每个工具名都在默认 Registry 中（双模式）、AVAILABLE
       TOOLS 段仅宣传当前模式允许的工具；prompts/system_test.go 钉死静态工具
       目录（GetToolDescriptions 及 plan/act 变体）与 Registry 三集合一致。
       起因：CAPABILITIES 段宣传 list_code_definition_names 但未注册。
+- [x] 模块改名 agentcore → cobot（commit 726cdae）+ 改名清扫（README/
+      包注释/错误前缀/系统提示词身份 `Config.AgentName`，2026-08-28）
+- [x] 清扫收尾：误入库的 `.maestro-mcp.json`（会话级 MCP 配置）出库并
+      加入 .gitignore；仓库不再跟踪任何会话本地文件
 
 ## What's Left to Build
 
 ### M0 仓库初始化 — 完成
 - [x] git init（main）+ 首次提交 + GitHub 推送
-- [x] go mod init github.com/liup215/agentcore（go 1.25）+ LICENSE (MIT)
+- [x] go mod init github.com/liup215/cobot（go 1.25）+ LICENSE (MIT)
 
 ### M1 骨架迁移（零第三方依赖）— 完成
 - [x] types/ 收编 gline pkg/types（剔除 render/slash，Estimator 注入）
@@ -83,7 +87,9 @@
 ## Current Status
 
 **M2 完成（loop 三段拆分 + ToolGuard + 自动重试 + 全部 Callback 事件，
-18 个行为测试 `-race -count=2` 绿；提交 43b31b2 + 654a4db）。**
+**M2 完成（loop 三段拆分 + ToolGuard + 自动重试 + 全部 Callback 事件，
+18 个行为测试 `-race -count=2` 绿；提交 43b31b2 + 654a4db）+ 根包门面
+（5f6e6ca）+ agentcore→cobot 改名清扫（726cdae 及后续清扫提交）完成。**
 §10 手术单清退完成：prompts 僵尸工具目录/Skills 段、types/skill_meta.go、
 tools ToolBehavior 系与 init.go 旁路 API 全部删除（净 -272 行）。
 **M3 完成（原生 Anthropic Messages 适配器：SSE 全事件 + thinking 独立通道 +
@@ -121,3 +127,4 @@ cache_control + stop_reason 映射 + HTTPError/Retry-After；29 个测试
 | 2026-08-28 | ephemeral cache_control 打在最后一个 system 块 | Anthropic 缓存"以 marker 结尾的最长前缀"；SystemPrompt 与历史 system 消息合并进顶层 system 数组（messages 内禁止 system 角色） |
 | 2026-08-28 | SSE 按 payload 的 type 字段派发，event: 行兜底 | 代理/网关可能剥离 event 行；data 无 type 时才回退 |
 | 2026-08-28 | SSE 解析复用 openai.go 的 isValidJSON/isCompleteJSONObject 括号修复与 partial-chunk 语义 | 两个 provider 行为一致，loop 无需区分 |
+| 2026-08-28 | 模块/仓库改名 agentcore → cobot（go.mod、import、README、包注释、错误前缀全量清扫），系统提示词 agent 身份提为 `Config.AgentName`（默认 "cobot"） | 项目更名与 GitHub 仓库一致；硬编码模型身份不利于复用方品牌化 |

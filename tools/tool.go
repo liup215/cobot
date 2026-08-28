@@ -1,4 +1,4 @@
-// Package tools provides the tool system for agentcore.
+// Package tools provides the tool system for cobot.
 // Tools are functions that the Agent can call to interact with the system.
 package tools
 

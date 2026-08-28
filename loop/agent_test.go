@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/liup215/cobot/prompts"
 	"github.com/liup215/cobot/provider"
 	"github.com/liup215/cobot/tools"
 	"github.com/liup215/cobot/types"
@@ -725,5 +726,66 @@ func TestCompactionEventsFire(t *testing.T) {
 	}
 	if len(snap.compactionEnds) == 0 {
 		t.Error("OnCompactionEnd never fired")
+	}
+}
+
+// ─── agent identity in the system prompt ─────────────────────────────────────
+
+// agentNameAgent builds a minimal BaseAgent (attempt_completion only) with
+// the given Options.AgentName, returning it plus the scripted provider so
+// the captured request can be inspected.
+func agentNameAgent(t *testing.T, agentName string) (*BaseAgent, *provider.ScriptedProvider) {
+	t.Helper()
+	prov := provider.NewScriptedProvider(
+		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c1", "done")}},
+	)
+	reg := tools.NewRegistry()
+	if err := reg.Register(&tools.ToolInfo{
+		Tool:         tools.NewAttemptCompletionTool(),
+		AllowedModes: []string{"plan", "act"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := New(Options{
+		Provider:     prov,
+		ToolRegistry: reg,
+		AgentName:    agentName,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agent, prov
+}
+
+// Options.AgentName is announced in the system prompt's role section; an
+// empty name falls back to prompts.DefaultAgentName.
+func TestAgentNameInSystemPrompt(t *testing.T) {
+	cases := []struct {
+		name      string
+		agentName string
+		want      string
+	}{
+		{"default", "", "You are " + prompts.DefaultAgentName + ","},
+		{"custom", "maestro-worker", "You are maestro-worker,"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			agent, prov := agentNameAgent(t, tc.agentName)
+			if err := agent.Run(context.Background(), "task"); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			reqs := prov.Requests()
+			if len(reqs) == 0 {
+				t.Fatal("provider captured no request")
+			}
+			sp := reqs[0].SystemPrompt
+			if !strings.HasPrefix(sp, tc.want) {
+				head := sp
+				if len(head) > 80 {
+					head = head[:80]
+				}
+				t.Errorf("system prompt = %q, want identity prefix %q", head, tc.want)
+			}
+		})
 	}
 }

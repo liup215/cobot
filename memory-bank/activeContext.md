@@ -1,4 +1,4 @@
-# Active Context: agentcore
+# Active Context: cobot
 
 ## 当前工作焦点
 
@@ -64,15 +64,34 @@ loop/stream.go:173 预派发副作用白名单 case 里列有 "kb_ingest"/"brows
   段与参数、types/skill_meta.go、tools ToolBehavior 系 + init.go 旁路 API
   全部删除；loop/agent.go 调用点同步（去 nil 实参）。净 -272 行，
   build/vet/test -race 全绿，零依赖不变。
+- 2026-08-28：**清扫收尾：会话本地配置出库**——commit dc67232 误将
+  `.maestro-mcp.json`（Maestro 会话级 MCP 配置，含本机 URL 与
+  role/task_id，每次会话都会漂移）提交进仓库。已 `git rm --cached`
+  出库（磁盘保留供本会话连接用）并加入 .gitignore；`git ls-files`
+  已无任何会话本地文件。
+
+- 2026-08-28：**agentcore → cobot 改名清扫**（commit 726cdae 改名 + 本次
+  清扫提交）：
+  - README：标题、模块路径 `github.com/liup215/cobot`、状态行
+    （M0–M2+根包门面完成，M3 进行中）、快速上手示例。
+  - 根包 cobot.go：包注释/示例改 cobot；错误前缀 `"agentcore:"` →
+    `"cobot:"`；新增 `Config.AgentName`（空 = "cobot"）。
+  - prompts/system.go：`GetSystemPrompt` 新增 agentName 参数（空 =
+    `prompts.DefaultAgentName`），角色行不再写死；loop `Options.AgentName`
+    透传；根包再导出 `cobot.DefaultAgentName`。
+  - 新增测试：prompts 身份（默认/自定义 + 遗留名泄漏回归）、loop 与门面
+    的 AgentName 透传；`go test -race -count=2 ./...` 全绿。
+  - types/tools 文档注释清扫；memory-bank 全部旧模块引用更新。
+
 - 2026-08-28：**根包门面完成（commit 5f6e6ca）**：
-  - agentcore.go（根包）：`Config`（平铺全可选：APIKey/BaseURL/Model 派生
+  - cobot.go（根包）：`Config`（平铺全可选：APIKey/BaseURL/Model 派生
     openai provider；Tools nil=默认九件套；Mode/AutoApprove/MaxTokens/
     RetryDelays/CustomRules；Guard/Store/Title 挂钩）+ `NewAgent(cfg)`。
   - aliases.go：类型别名全量再导出（Agent/Callback/CallbackAdapter/
     ToolGuard/GuardedCall/Store/Provider/ToolRegistry/Tool、ModeAct/
     ModePlan、ErrAbortRun、DefaultRetryDelays）——使用方只 import 根包
     即可实现全部钩子接口。
-  - agentcore_test.go：门面端到端（scripted provider → attempt_completion
+  - cobot_test.go：门面端到端（scripted provider → attempt_completion
     → 事件回调）、默认注册表、凭据校验、自定义注册表注入。
   - 动机：用户反馈 loop.New 组装语义不清晰、要单一 config 参数；
     评估三方案（根包门面 / loop 改名 agent / 单包合并）后选定门面。
@@ -98,6 +117,9 @@ loop/stream.go:173 预派发副作用白名单 case 里列有 "kb_ingest"/"brows
 - 2026-08-28：M1 完成（types/provider/tools，commits 477b224、da55106）。
 
 **重要经验**：
+- 会话级配置（`.maestro-mcp.json` 等 worktree 注入文件）绝不入库：
+  提交前必须扫一眼 `git status`/`git add -A` 暂存清单，确认没有混入
+  非任务文件；这类文件一律 .gitignore。
 - 从 gline 迁移文件一律用 `cp` + 字节级 `sed`（包名、import、前缀），
   禁止 write 重写迁移源文件——不可见字符问题反复出现。
 - **bash heredoc 追加大段 Go 代码不可靠**（长内容会被静默截断），新测试
@@ -127,7 +149,8 @@ loop/stream.go:173 预派发副作用白名单 case 里列有 "kb_ingest"/"brows
 
 ## 活跃决策
 
-- **模块路径** `github.com/liup215/agentcore`，仓库目录名 agent-core（本地）。
+- **模块路径** `github.com/liup215/cobot`（2026-08-28 由 agentcore 改名，
+  commit 726cdae），仓库目录名 cobot（本地与 GitHub 同名）。
 - **零依赖硬约束**：go.mod require 仅 stdlib；日志用 log/slog shim。
 - **提取基线冻结**：gline @ 2026-06-27；行为变更仅限上述三项修复 +
   requirements.md 的四项新增（Anthropic/ToolGuard/Summarize/重试）。

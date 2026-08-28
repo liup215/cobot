@@ -130,6 +130,46 @@ func TestErrAbortRunSentinel(t *testing.T) {
 	_ = wrapped
 }
 
+// Config.AgentName feeds the system prompt's role identity; empty defaults
+// to cobot.DefaultAgentName.
+func TestAgentNameInSystemPrompt(t *testing.T) {
+	cases := []struct {
+		name      string
+		agentName string
+		want      string
+	}{
+		{"default", "", "You are " + cobot.DefaultAgentName + ","},
+		{"custom", "maestro-worker", "You are maestro-worker,"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scripted := provider.NewScriptedProvider(completionScript("done"))
+			agent, err := cobot.NewAgent(cobot.Config{
+				Provider:  scripted,
+				AgentName: tc.agentName,
+			})
+			if err != nil {
+				t.Fatalf("NewAgent: %v", err)
+			}
+			if err := agent.Run(context.Background(), "hello"); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			reqs := scripted.Requests()
+			if len(reqs) == 0 {
+				t.Fatal("provider captured no request")
+			}
+			sp := reqs[0].SystemPrompt
+			if !strings.HasPrefix(sp, tc.want) {
+				head := sp
+				if len(head) > 80 {
+					head = head[:80]
+				}
+				t.Errorf("system prompt = %q, want identity prefix %q", head, tc.want)
+			}
+		})
+	}
+}
+
 // echoTool implements cobot.Tool via the tools package.
 type echoTool struct{}
 

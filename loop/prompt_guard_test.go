@@ -58,7 +58,7 @@ func buildLoopSystemPrompt(mode Mode) string {
 	if mode == ModePlan {
 		toolDescs = filterPlanModeTools(toolDescs)
 	}
-	return prompts.GetSystemPrompt(string(mode), toolDescs, "", nil)
+	return prompts.GetSystemPrompt(string(mode), toolDescs, "", "")
 }
 
 // scrubEnvPaths removes machine-specific paths that GetSystemPrompt embeds

@@ -9,15 +9,23 @@ import (
 	"strings"
 )
 
+// DefaultAgentName is the agent identity used in the system prompt when the
+// caller does not supply one.
+const DefaultAgentName = "cobot"
+
 // GetSystemPrompt returns the appropriate system prompt for the given mode.
-// tools carries the descriptions of the tools available in this mode; they
-// are rendered into the AVAILABLE TOOLS section. If customRules is
-// non-empty, it is appended after the tool section.
-func GetSystemPrompt(mode string, tools []ToolDescription, customRules string) string {
+// agentName is the agent identity announced in the role section; empty
+// falls back to DefaultAgentName. If customRules is non-empty, it is
+// section is added telling the LLM about available skills and the
+// use_skill tool.
+func GetSystemPrompt(mode string, tools []ToolDescription, customRules string, skills []types.SkillMeta, agentName string) string {
+	if agentName == "" {
+		agentName = DefaultAgentName
+	}
 	var prompt strings.Builder
 
 	// Agent Role
-	prompt.WriteString("You are agentcore, a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices.")
+	prompt.WriteString("You are " + agentName + ", a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices.")
 
 	// ====
 	prompt.WriteString("\n\n====\n\n")

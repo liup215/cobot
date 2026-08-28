@@ -99,6 +99,10 @@ type Options struct {
 	// CustomRules is extra text appended to the system prompt
 	CustomRules string
 
+	// AgentName is the agent identity announced in the system prompt's
+	// role section ("You are <AgentName>, ..."). Empty = prompts.DefaultAgentName.
+	AgentName string
+
 	// Store is the optional persistent storage for conversation history
 	Store Store
 
@@ -133,6 +137,7 @@ type BaseAgent struct {
 	maxConsecutiveMistakes int
 	consecutiveMistakes    int
 	customRules            string
+	agentName              string
 
 	guard      ToolGuard // optional approval gate for tool calls
 	store      Store     // persistent storage
@@ -183,6 +188,11 @@ func New(opts Options) (*BaseAgent, error) {
 		maxMistakes = 3
 	}
 
+	agentName := opts.AgentName
+	if agentName == "" {
+		agentName = prompts.DefaultAgentName
+	}
+
 	conv := types.NewConversation()
 	if opts.MaxTokens > 0 {
 		conv.MaxTokens = opts.MaxTokens
@@ -196,6 +206,7 @@ func New(opts Options) (*BaseAgent, error) {
 		autoApprove:            opts.AutoApprove,
 		maxConsecutiveMistakes: maxMistakes,
 		customRules:            opts.CustomRules,
+		agentName:              agentName,
 		guard:                  opts.Guard,
 		store:                  opts.Store,
 		taskTitle:              opts.Title,
@@ -272,7 +283,7 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 		if a.mode == ModePlan {
 			toolDescs = filterPlanModeTools(toolDescs)
 		}
-		systemPrompt := prompts.GetSystemPrompt(string(a.mode), toolDescs, a.customRules)
+		systemPrompt := prompts.GetSystemPrompt(string(a.mode), toolDescs, a.customRules, a.agentName)
 
 		// Trim conversation if it exceeds token budget before sending.
 		if a.conversation.IsTokenAboveThreshold(100) {
