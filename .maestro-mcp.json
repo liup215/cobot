@@ -2,7 +2,7 @@
   "mcpServers": {
     "maestro": {
       "type": "sse",
-      "url": "http://127.0.0.1:17357/mcp/sse?role=software_developer\u0026task_id=748a99fa93050a7d86635b3101ed661d"
+      "url": "http://127.0.0.1:17357/mcp/sse?role=software_developer\u0026task_id=a7c1e3c3c40871eeab2995971d955e26"
     }
   }
 }

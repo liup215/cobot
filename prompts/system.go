@@ -7,15 +7,13 @@ import (
 	"os"
 	"runtime"
 	"strings"
-
-	"github.com/liup215/cobot/types"
 )
 
 // GetSystemPrompt returns the appropriate system prompt for the given mode.
-// If customRules is non-empty, it is appended before the skill section.
-// If skills is non-empty, a SKILLS section is added telling the LLM about
-// available skills and the use_skill tool.
-func GetSystemPrompt(mode string, tools []ToolDescription, customRules string, skills []types.SkillMeta) string {
+// tools carries the descriptions of the tools available in this mode; they
+// are rendered into the AVAILABLE TOOLS section. If customRules is
+// non-empty, it is appended after the tool section.
+func GetSystemPrompt(mode string, tools []ToolDescription, customRules string) string {
 	var prompt strings.Builder
 
 	// Agent Role
@@ -76,28 +74,7 @@ func GetSystemPrompt(mode string, tools []ToolDescription, customRules string, s
 		prompt.WriteString(customRules)
 	}
 
-	// Append SKILLS section if skills are available
-	if len(skills) > 0 {
-		prompt.WriteString("\n\n# SKILLS\n\n")
-		prompt.WriteString(buildSkillsSection(skills))
-	}
-
 	return prompt.String()
-}
-
-// buildSkillsSection generates the skills section for the system prompt.
-func buildSkillsSection(skills []types.SkillMeta) string {
-	var b strings.Builder
-	b.WriteString("The following skills provide specialized instructions for specific tasks. When a user's request matches a skill description, use the use_skill tool to load and activate the skill.\n\n")
-	b.WriteString("Available skills:\n")
-	for _, s := range skills {
-		b.WriteString(fmt.Sprintf("  - \"%s\": %s\n", s.Name, s.Description))
-	}
-	b.WriteString("\nTo use a skill:\n")
-	b.WriteString("1. Match the user's request to a skill based on its description\n")
-	b.WriteString("2. Call use_skill with the skill_name parameter set to the exact skill name\n")
-	b.WriteString("3. Follow the instructions returned by the tool")
-	return b.String()
 }
 
 // getToolUseSection returns the tool use section with formatting, guidelines, and examples.
@@ -246,106 +223,4 @@ func buildToolSection(tools []ToolDescription) string {
 	builder.WriteString(`---\n`)
 
 	return builder.String()
-}
-
-// GetToolDescriptions returns descriptions for all built-in tools.
-// This is the static mirror of tools.InitDefaultRegistry(); the prompt-guard
-// test asserts the two sets stay identical, so a tool added to one must be
-// added to the other.
-func GetToolDescriptions() []ToolDescription {
-	return []ToolDescription{
-		{
-			Name:        "read_file",
-			Description: "Read the contents of a file at the specified path. Use this when you need to examine the contents of an existing file.",
-			InputSchema: `{"type":"object","properties":{"path":{"type":"string","description":"The path of the file to read"}},"required":["path"] }`,
-		},
-		{
-			Name:        "write_to_file",
-			Description: "Write content to a file at the specified path. If the file exists, it will be overwritten. Use this when creating new files or completely rewriting existing files.",
-			InputSchema: `{"type":"object","properties":{"path":{"type":"string","description":"The path of the file to write"},"content":{"type":"string","description":"The content to write to the file"}} ,"required":["path","content"] }`,
-		},
-		{
-			Name:        "replace_in_file",
-			Description: "Replace specific content in a file using exact search/replace. Supports single blocks or an array of replacements for multiple edits. Use this for targeted modifications to existing files.",
-			InputSchema: `{"type":"object","properties":{"path":{"type":"string","description":"The path of the file to modify"},"search":{"type":"string","description":"Exact content to find (single block style)"},"replace":{"type":"string","description":"Content to replace with (single block style)"},"replacements":{"type":"array","description":"Array of replacement blocks. Preferred for multiple edits.","items":{"type":"object","properties":{"search":{"type":"string","description":"Exact content to find"},"replace":{"type":"string","description":"Content to replace with"}},"required":["search","replace"]}}} ,"required":["path"] }`,
-		},
-		{
-			Name:        "list_files",
-			Description: "List files and directories at the specified path. Use this to explore the file system.",
-			InputSchema: `{"type":"object","properties":{"path":{"type":"string","description":"The path of the directory to list"},"recursive":{"type":"boolean","description":"List recursively"}} ,"required":["path"] }`,
-		},
-		{
-			Name:        "search_files",
-			Description: "Search for a regex pattern in files within a directory. Returns context-rich results with file paths, line numbers, and surrounding context.",
-			InputSchema: `{"type":"object","properties":{"path":{"type":"string","description":"Directory to search"},"regex":{"type":"string","description":"Pattern to search for"},"file_pattern":{"type":"string","description":"Glob pattern to filter files"}} ,"required":["path","regex"] }`,
-		},
-		{
-			Name:        "list_code_definition_names",
-			Description: "List definition names (functions, classes, methods, etc.) in code files within a directory. Provides insights into codebase structure.",
-			InputSchema: `{"type":"object","properties":{"path":{"type":"string","description":"Directory to analyze"},"file_pattern":{"type":"string","description":"Glob pattern to filter files"}} ,"required":["path"] }`,
-		},
-		{
-			Name:        "execute_command",
-			Description: "Execute a CLI command on the system. Use this when you need to perform system operations or run specific commands.",
-			InputSchema: `{"type":"object","properties":{"command":{"type":"string","description":"The command to execute"},"requires_approval":{"type":"boolean","description":"Whether this command requires user approval","default":false},"timeout":{"type":"integer","description":"Timeout in seconds"}} ,"required":["command"] }`,
-		},
-		{
-			Name:        "ask_followup_question",
-			Description: "Ask the user a question to gather clarifying information or make a decision. Use this when you need more information to complete a task.",
-			InputSchema: `{"type":"object","properties":{"question":{"type":"string","description":"The question to ask"},"options":{"type":"array","items":{"type":"string"},"description":"Options for the user to choose from"}} ,"required":["question"] }`,
-		},
-		{
-			Name:        "attempt_completion",
-			Description: "Indicate that you have completed the task and provide a summary of what was accomplished. Use this when you have finished all required work.",
-			InputSchema: `{"type":"object","properties":{"result":{"type":"string","description":"Summary of what was accomplished"},"command":{"type":"string","description":"Command to showcase the result"}} ,"required":["result"] }`,
-		},
-		{
-			Name:        "plan_mode_respond",
-			Description: "Respond to the user in plan mode. Use this to present your plan, ask questions, or engage in back-and-forth conversation before implementing.",
-			InputSchema: `{"type":"object","properties":{"response":{"type":"string","description":"The response to present to the user in plan mode"}},"required":["response"] }`,
-		},
-	}
-}
-
-// Mode restrictions, mirroring the AllowedModes of tools.InitDefaultRegistry().
-// Side-effect tools are act-only; plan_mode_respond exists only to talk to the
-// user in plan mode. These maps are pinned to the registry by system_test.go.
-var (
-	// actOnlyTools have side effects and are usable in act mode only.
-	actOnlyTools = map[string]bool{
-		"write_to_file":   true,
-		"replace_in_file": true,
-		"execute_command": true,
-	}
-
-	// planOnlyTools are usable in plan mode only.
-	planOnlyTools = map[string]bool{
-		"plan_mode_respond": true,
-	}
-)
-
-// filterToolDescriptions drops the tools whose names appear in excluded.
-func filterToolDescriptions(all []ToolDescription, excluded map[string]bool) []ToolDescription {
-	filtered := make([]ToolDescription, 0, len(all))
-	for _, tool := range all {
-		if !excluded[tool.Name] {
-			filtered = append(filtered, tool)
-		}
-	}
-	return filtered
-}
-
-// GetPlanModeToolDescriptions returns tool descriptions for plan mode
-func GetPlanModeToolDescriptions() []ToolDescription {
-	return filterToolDescriptions(GetToolDescriptions(), actOnlyTools)
-}
-
-// GetActModeToolDescriptions returns tool descriptions for act mode
-func GetActModeToolDescriptions() []ToolDescription {
-	return filterToolDescriptions(GetToolDescriptions(), planOnlyTools)
-}
-
-// FormatToolUseExample returns an example of how to use a tool
-func FormatToolUseExample(toolName string, input map[string]interface{}) string {
-	return fmt.Sprintf("Using tool: %s with input: %v", toolName, input)
 }

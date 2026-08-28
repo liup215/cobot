@@ -272,7 +272,7 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 		if a.mode == ModePlan {
 			toolDescs = filterPlanModeTools(toolDescs)
 		}
-		systemPrompt := prompts.GetSystemPrompt(string(a.mode), toolDescs, a.customRules, nil)
+		systemPrompt := prompts.GetSystemPrompt(string(a.mode), toolDescs, a.customRules)
 
 		// Trim conversation if it exceeds token budget before sending.
 		if a.conversation.IsTokenAboveThreshold(100) {

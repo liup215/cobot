@@ -73,36 +73,6 @@ func ParseInput(input json.RawMessage, target interface{}) error {
 	return nil
 }
 
-// DisplayMode constants for ToolBehavior
-const (
-	// DisplayDefault shows a standard system message (e.g. "🔧 read_file: main.go")
-	DisplayDefault = "default"
-	// DisplayAssistant renders the tool output as an assistant message (full markdown)
-	DisplayAssistant = "assistant"
-	// DisplaySkip suppresses the message entirely (displayed elsewhere)
-	DisplaySkip = "skip"
-)
-
-// ToolBehavior defines how a tool's start/complete events are displayed in the UI.
-// This is metadata only — the TUI reads it to decide rendering; Tool itself has no UI dependency.
-type ToolBehavior struct {
-	// StartDisplayMode controls how the tool-start event is rendered.
-	// Values: DisplayDefault, DisplayAssistant, DisplaySkip.
-	StartDisplayMode string
-
-	// CompleteDisplayMode controls how the tool-complete event is rendered.
-	// Values: DisplayDefault, DisplayAssistant, DisplaySkip.
-	CompleteDisplayMode string
-}
-
-// DefaultToolBehavior returns the default behavior (both modes = DisplayDefault).
-func DefaultToolBehavior() ToolBehavior {
-	return ToolBehavior{
-		StartDisplayMode:    DisplayDefault,
-		CompleteDisplayMode: DisplayDefault,
-	}
-}
-
 // ToolCategory represents the category of a tool
 type ToolCategory string
 
@@ -136,10 +106,6 @@ type ToolInfo struct {
 
 	// RequiresConfirmation indicates if user confirmation is needed
 	RequiresConfirmation bool
-
-	// Behavior controls how this tool's events are displayed in the UI.
-	// Defaults to DefaultToolBehavior() when zero-valued.
-	Behavior ToolBehavior
 }
 
 // IsAllowedInMode checks if the tool can be used in the given mode

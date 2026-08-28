@@ -2,6 +2,29 @@
 
 ## 当前工作焦点
 
+**§10 手术单清退（遗留 API 清理）**：删除三块违反需求 §10 剔除清单的
+gline 遗留公开 API（净 -272 行）：
+- prompts/system.go：GetToolDescriptions/GetPlanModeToolDescriptions/
+  GetActModeToolDescriptions/FormatToolUseExample（零调用且宣称
+  use_subagents/web_fetch/browser_copy）+ buildSkillsSection +
+  GetSystemPrompt 的 skills 参数（调用方 loop/agent.go 传 nil）。
+  loop 在用的 ToolDescription 类型与 buildToolSection 保留。
+- types/skill_meta.go 整文件删除（Skill/SkillMeta；Skills 是 §2.2 非目标）。
+- tools/tool.go：ToolBehavior/DisplayDefault/DisplayAssistant/DisplaySkip/
+  DefaultToolBehavior/ToolInfo.Behavior（TUI 是非目标，无人读取）。
+- tools/init.go：GetDefaultTools/GetToolsForMode/IsToolAllowed
+  （硬编码模式表，与 Registry.GetForMode/IsAllowed 重复的旁路）。
+
+**已知残留（有意保留，超出本次点名范围且删除会改行为）**：
+loop/stream.go:173 预派发副作用白名单 case 里列有 "kb_ingest"/"browser_copy"
+（剔除工具名）。该白名单是安全网——删除会使同名自定义工具变为可预派发
+（竞态风险），故保留。
+
+**根包门面（facade）已落地（commit 5f6e6ca）**：用户反馈 loop.New 组装语义
+不清晰、想要单一 Config 入口。现公开入口 = `agentcore.NewAgent(Config)`，
+子包架构不变（门面纯语法糖，`Agent = loop.BaseAgent` 别名零包装）。
+M2 全部完成；下一步 **M3：Anthropic 适配器**。
+
 **根包门面（facade）已落地（commit 5f6e6ca）**：用户反馈 loop.New 组装语义
 不清晰、想要单一 Config 入口。现公开入口 = `agentcore.NewAgent(Config)`，
 子包架构不变（门面纯语法糖，`Agent = loop.BaseAgent` 别名零包装）。
@@ -33,6 +56,10 @@ M2 全部完成；下一步 **M3：Anthropic 适配器**。
   - 验收：`go build/vet/gofmt` 干净，`go list -m all` 仅本模块，
     `go test -race -count=2 ./...` 全绿。
 
+- 2026-08-28：**§10 遗留 API 清退**：prompts 僵尸工具目录四函数 + Skills
+  段与参数、types/skill_meta.go、tools ToolBehavior 系 + init.go 旁路 API
+  全部删除；loop/agent.go 调用点同步（去 nil 实参）。净 -272 行，
+  build/vet/test -race 全绿，零依赖不变。
 - 2026-08-28：**根包门面完成（commit 5f6e6ca）**：
   - agentcore.go（根包）：`Config`（平铺全可选：APIKey/BaseURL/Model 派生
     openai provider；Tools nil=默认九件套；Mode/AutoApprove/MaxTokens/
