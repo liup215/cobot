@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,10 +174,10 @@ func TestReadFileTool_LineRange(t *testing.T) {
 	}
 }
 
-func TestReadFileTool_LargeFileRejected(t *testing.T) {
+func TestReadFileTool_LargeFileTruncated(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "big.txt")
-	big := strings.Repeat("x", 110*1024)
+	big := strings.Repeat("x", 110*1024) + "\nthe tail line\n"
 	_ = os.WriteFile(path, []byte(big), 0644)
 
 	tool := NewReadFileTool()
@@ -186,10 +187,33 @@ func TestReadFileTool_LargeFileRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(result, "File too large") {
-		t.Errorf("expected 'File too large' guard, got: %s", result)
+	if !strings.Contains(result, "[File truncated:") {
+		t.Error("expected an explicit truncation notice")
 	}
-	if !strings.Contains(result, "search_files") {
-		t.Errorf("expected guidance to use search_files, got: %s", result)
+	if !strings.Contains(result, "search_files") || !strings.Contains(result, "start_line") {
+		t.Errorf("expected guidance to narrow down the read, got the tail: %s", tail(result, 200))
+	}
+	// The returned body is capped, not the whole 110KB file.
+	if len(result) > MaxReadFileBytes+400 {
+		t.Errorf("result not capped: %d bytes", len(result))
+	}
+	if !strings.Contains(result, fmt.Sprintf("%d bytes", len(big))) {
+		t.Error("notice should report the real file size")
+	}
+}
+
+func TestReadFileTool_SmallFileUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "small.txt")
+	_ = os.WriteFile(path, []byte("hello\nworld\n"), 0644)
+
+	tool := NewReadFileTool()
+	input, _ := json.Marshal(map[string]string{"path": path})
+	result, err := tool.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "hello\nworld\n" {
+		t.Errorf("small file read modified: %q", result)
 	}
 }

@@ -1,6 +1,7 @@
 package cobot
 
 import (
+	"github.com/liup215/cobot/compact"
 	"github.com/liup215/cobot/loop"
 	"github.com/liup215/cobot/prompts"
 	"github.com/liup215/cobot/provider"
@@ -40,6 +41,41 @@ var ErrAbortRun = loop.ErrAbortRun
 
 // Store persists tasks, messages and tool calls.
 type Store = loop.Store
+
+// Strategy is a conversation compaction strategy (compact.Trim,
+// compact.Summarize or compact.Combo). Config.Compaction accepts any
+// implementation.
+type Strategy = compact.Strategy
+
+// Summarizer condenses conversation rounds that are about to be compacted.
+// compact.SummarizerFunc adapts a function; loop.NewProviderSummarizer adapts
+// a Provider (this is the default).
+type Summarizer = compact.Summarizer
+
+// SummarizerFunc adapts a function to the Summarizer interface.
+type SummarizerFunc = compact.SummarizerFunc
+
+// Compaction strategies and their knobs, re-exported for one-import use.
+type (
+	// TrimStrategy is the gline watermark trimming strategy.
+	TrimStrategy = compact.Trim
+	// SummarizeStrategy is the LLM summarization strategy.
+	SummarizeStrategy = compact.Summarize
+	// ComboStrategy runs a primary strategy with a fallback.
+	ComboStrategy = compact.Combo
+)
+
+// Compaction defaults re-exported for hosts tuning a strategy.
+const (
+	// DefaultKeepRounds is how many recent rounds compaction keeps verbatim.
+	DefaultKeepRounds = compact.DefaultKeepRounds
+	// DefaultSummarizePrompt is the default structured-summary prompt.
+	DefaultSummarizePrompt = compact.DefaultSummarizePrompt
+)
+
+// NewProviderSummarizer adapts a Provider to the Summarizer interface with a
+// single non-streaming LLM call (the default summarizer).
+var NewProviderSummarizer = loop.NewProviderSummarizer
 
 // Provider is a streaming LLM backend.
 type Provider = provider.Provider

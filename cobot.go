@@ -14,11 +14,13 @@
 // Everything is optional and has a sensible default: the tool set defaults
 // to the built-in registry (read/write/replace/search/execute/list files
 // plus the interaction tools), the mode defaults to act, and connection
-// retries use exponential backoff. Advanced use cases — custom providers,
-// custom tools, approval gates, persistence, streaming UIs — inject the
-// corresponding component via Config; the underlying packages
-// (loop, provider, tools, types, prompts) remain fully accessible for
-// advanced composition.
+// retries use exponential backoff. Long tasks are compacted automatically:
+// past 60% of the context budget the oldest rounds are summarized into a
+// structured recap and any summarization failure falls back to watermark
+// trimming. Advanced use cases — custom providers, custom tools, approval
+// gates, persistence, streaming UIs — inject the corresponding component via
+// Config; the underlying packages (loop, provider, tools, compact, types,
+// prompts) remain fully accessible for advanced composition.
 package cobot
 
 import (
@@ -104,6 +106,28 @@ type Config struct {
 	// nil = DefaultRetryDelays (1s/2s/4s/8s); empty non-nil = disabled.
 	RetryDelays []time.Duration
 
+	// ── Long-task context compaction ─────────────────────────────
+
+	// Compaction overrides the conversation compaction strategy applied at
+	// the token-budget trigger points (60% pre-request check, 80%
+	// auto-compact). nil = compact.NewCombo(compact.NewSummarize(...),
+	// compact.NewTrim()): the oldest rounds are condensed into one structured
+	// summary (task goal / completed steps / decisions / open questions /
+	// files) while the last 6 rounds stay verbatim, and any failure — no
+	// summarizer, provider error, empty summary, timeout — falls back to the
+	// gline watermark Trim.
+	Compaction Strategy
+
+	// Summarizer replaces the summarizer used by the default compaction
+	// strategy. nil = one non-streaming call over the session provider
+	// (NewProviderSummarizer). Ignored when Compaction is set.
+	Summarizer Summarizer
+
+	// SummarizePrompt overrides the summarization instructions
+	// (DefaultSummarizePrompt). The transcript is always appended after the
+	// prompt. Ignored when Compaction is set.
+	SummarizePrompt string
+
 	// ── Optional hooks ───────────────────────────────────────────
 
 	// Guard is consulted before every tool execution (both execution
@@ -144,6 +168,9 @@ func NewAgent(cfg Config) (*Agent, error) {
 		AgentName:              cfg.AgentName,
 		MaxTokens:              cfg.MaxTokens,
 		RetryDelays:            cfg.RetryDelays,
+		Compaction:             cfg.Compaction,
+		Summarizer:             cfg.Summarizer,
+		SummarizePrompt:        cfg.SummarizePrompt,
 		Guard:                  cfg.Guard,
 		Store:                  cfg.Store,
 		Title:                  cfg.Title,

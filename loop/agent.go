@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/liup215/cobot/compact"
 	"github.com/liup215/cobot/prompts"
 	"github.com/liup215/cobot/provider"
 	"github.com/liup215/cobot/tools"
@@ -122,6 +123,22 @@ type Options struct {
 	// longer than the entry wins. nil = DefaultRetryDelays (1s/2s/4s/8s);
 	// empty non-nil slice disables retrying.
 	RetryDelays []time.Duration
+
+	// Compaction is the strategy applied at the token-budget trigger points
+	// (the 60% pre-request budget check and the 80% auto-compact). nil =
+	// compact.NewCombo over a compact.Summarize strategy (LLM summarization,
+	// keep the last 6 rounds) and a compact.Trim fallback (gline watermark
+	// trimming). Any summarization failure falls back to Trim.
+	Compaction compact.Strategy
+
+	// Summarizer is used by the default compaction strategy to condense old
+	// rounds. nil = ProviderSummarizer over Options.Provider (one
+	// non-streaming call). Ignored when Compaction is set.
+	Summarizer compact.Summarizer
+
+	// SummarizePrompt overrides the default structured-summary prompt
+	// (compact.DefaultSummarizePrompt). Ignored when Compaction is set.
+	SummarizePrompt string
 }
 
 // BaseAgent implements the Agent interface
@@ -146,6 +163,8 @@ type BaseAgent struct {
 	workingDir string
 
 	retryDelays []time.Duration // stream-connection retry schedule (nil = default)
+
+	compaction compact.Strategy // conversation compaction strategy (never nil after New)
 
 	// Stream pre-dispatch: tool calls start executing while the SSE stream is still ongoing.
 	pendingToolCallsMu     sync.Mutex
@@ -198,6 +217,21 @@ func New(opts Options) (*BaseAgent, error) {
 		conv.MaxTokens = opts.MaxTokens
 	}
 
+	// Default compaction: summarize the old rounds with the session's own
+	// provider and fall back to the gline watermark trim when that is
+	// impossible for any reason.
+	compaction := opts.Compaction
+	if compaction == nil {
+		summarizer := opts.Summarizer
+		if summarizer == nil {
+			summarizer = NewProviderSummarizer(opts.Provider)
+		}
+		compaction = compact.NewCombo(
+			&compact.Summarize{Summarizer: summarizer, Prompt: opts.SummarizePrompt},
+			compact.NewTrim(),
+		)
+	}
+
 	return &BaseAgent{
 		provider:               opts.Provider,
 		toolRegistry:           opts.ToolRegistry,
@@ -211,6 +245,7 @@ func New(opts Options) (*BaseAgent, error) {
 		store:                  opts.Store,
 		taskTitle:              opts.Title,
 		retryDelays:            opts.RetryDelays,
+		compaction:             compaction,
 	}, nil
 }
 
@@ -452,18 +487,38 @@ func (a *BaseAgent) SetTaskTitle(title string) {
 	a.taskTitle = title
 }
 
-// Compact manually compacts the conversation by removing oldest messages,
-// keeping the system prompt and the most recent conversation turns.
-// Returns true if compaction actually occurred.
+// Compact manually compacts the conversation with the configured compaction
+// strategy (summarize + trim fallback by default). Returns true if
+// compaction actually occurred (fewer messages or fewer tokens afterwards).
 func (a *BaseAgent) Compact() bool {
-	before := a.conversation.MessageCount()
-	a.conversation.AutoCompact()
-	after := a.conversation.MessageCount()
-	compacted := after < before
+	beforeMsgs := a.conversation.MessageCount()
+	beforeTokens := a.conversation.GetTotalTokens()
+	a.runCompaction(context.Background(), a.conversation)
+	afterMsgs := a.conversation.MessageCount()
+	compacted := afterMsgs < beforeMsgs || a.conversation.GetTotalTokens() < beforeTokens
 	if compacted {
-		logInfof("Compacted conversation: %d -> %d messages, %d tokens", before, after, a.conversation.GetTotalTokens())
+		logInfof("Compacted conversation: %d -> %d messages, %d tokens", beforeMsgs, afterMsgs, a.conversation.GetTotalTokens())
 	}
 	return compacted
+}
+
+// runCompaction applies the compaction strategy to conv. A strategy error is
+// logged and swallowed: compaction is an optimization, never a reason to fail
+// the run (the pre-send hard trim stays the safety net).
+func (a *BaseAgent) runCompaction(ctx context.Context, conv *types.Conversation) {
+	if a.compaction == nil {
+		// Zero-value agent (constructed outside New): legacy gline behavior.
+		conv.AutoCompact()
+		return
+	}
+	if err := a.compaction.Compact(ctx, conv); err != nil {
+		logWarnf("Compaction strategy %T failed: %v", a.compaction, err)
+	}
+}
+
+// GetCompaction returns the configured compaction strategy.
+func (a *BaseAgent) GetCompaction() compact.Strategy {
+	return a.compaction
 }
 
 // needsTool determines whether the assistant should be forced to call at
@@ -603,7 +658,7 @@ func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string,
 	if callback != nil {
 		callback.OnCompactionStart(reason)
 	}
-	conv.AutoCompact()
+	a.runCompaction(ctx, conv)
 
 	if conv.GetTotalTokens() > budget*8/10 {
 		conv.TrimToMaxTokens()

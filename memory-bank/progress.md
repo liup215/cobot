@@ -70,13 +70,63 @@
       请求形状/映射 11），anthropic.go/wire.go 函数覆盖率 95-100%，
       `go test ./... -race` 全绿
 
-### M4 compaction 与工具集
+### M4 compaction 与工具集 — 完成
 - [x] 工具集定稿之一：list_code_definition_names **保留并注册**进默认 Registry
       （plan/act 双模式，CategoryCode；类型枚举 ToolListCodeDefinitionNames 同步；
       新增工具单测 + 提示词↔Registry 守卫测试，见 loop/prompt_guard_test.go）
-- [ ] compact.Strategy 接口 + Trim（移植）+ Summarize（新写，K=6 轮）
-- [ ] 默认组合：Summarize 失败回退 Trim
-- [ ] 工具行为定稿（截断/超时/大文件策略）
+- [x] compact.Strategy 接口（ShouldCompact + Compact，就地重写、可重复调用、
+      错误=“本策略未生效”）+ compact.Round/SplitRounds（轮 = 一条用户消息及其
+      响应；assistant tool_call 与 tool 结果永不分家；前置 system 不属于任何轮）
+- [x] compact.Trim（gline 水位修剪移植）：60/80 水位（默认）、保留 system + 首条
+      用户消息（原始任务）+ 最近 KeepRounds（默认 6）轮；从最老轮开始丢弃、含
+      notice 预算的精确投影决定丢几轮；仍超 80% 时回落 gline 硬修剪
+      Conversation.TrimToMaxTokens（保留 system + 至少 2 条消息）
+- [x] compact.Summarize（新写）：K=6 轮内保留原文，更早轮渲染成转录
+      （user/assistant/tool result 标注、单条 2000 字符上限、总预算
+      DefaultMaxTranscriptTokens=24000）交给 Summarizer（默认
+      loop.ProviderSummarizer 单次非流式调用，MaxTokens 1024），替换为一条
+      RoleUser 结构化摘要（五段：Task goal/Completed steps/Key decisions/
+      Open questions/Files + `[COMPACTED]` 头）；提示词可被 Config.SummarizePrompt
+      覆盖；无 summarizer（ErrNoSummarizer）/provider 错误/空摘要
+      （ErrEmptySummary）/超时（默认 120s）/无待压缩轮（不花 LLM 调用）均为错误
+- [x] compact.Combo：主策略（Summarize）失败或未把会话压到回退水位以下时回退
+      Trim；双失败返回合并错误（loop 记日志继续跑，硬修剪兜底）
+- [x] loop 接线：Options.Compaction/Summarizer/SummarizePrompt；默认 =
+      Combo(Summarize(ProviderSummarizer), Trim)；`Compact()` 手动触发改走策略；
+      enforceTokenBudget 60% 触发点与 80% 挂点改走策略，
+      OnCompactionStart/OnCompactionEnd 事件配对不变（预发送 100% 仍是
+      TrimToMaxTokens 硬修剪，无 LLM）
+- [x] 根包门面：Config.Compaction/Summarizer/SummarizePrompt + aliases.go 再导出
+      （Strategy/Summarizer/Trim/Summarize/Combo/DefaultKeepRounds/
+      DefaultSummarizePrompt/NewProviderSummarizer）
+- [x] 工具行为定稿（全部有测试钉住，见 tools/behavior_test.go）：
+      execute_command 默认超时 120s（DefaultCommandTimeoutSeconds，可按调用
+      覆盖）且真的杀进程树（Windows taskkill /F /T + WaitDelay=3s 兜底，修复
+      cmd.exe 不转发 kill 导致的 29s 挂起）；stdout/stderr 分离采集；
+      各自 32KB 截断（保头 3/4 + 尾 1/4 + 截断标记）；shell 选择抽成
+      shellCommand() 并钉死（windows=cmd /C，其余=sh -c）；前台阻塞语义写入
+      描述（禁止用于长驻服务）
+      read_file 大文件策略从“拒绝”改为“头截断 + 通知”：整文件 64KB
+      （MaxReadFileBytes）、行区间 100KB（MaxReadRangeBytes），通知报告真实
+      字节数/行数并指路 search_files/start_line；修掉原 4000 token 阈值使
+      100KB 阈值成死代码的问题（len/2 估算法下有效阈值只有 ~8KB）
+      write_to_file / replace_in_file：writeFileAtomic（同目录临时文件 +
+      rename，保留原文件 mode，新文件 0644）——写失败不破坏原文件；
+      replace_in_file 全部块先在内存中应用，任一块失配则整文件不动并点名失败块
+      search_files：sort.SliceStable + (path,line,column) 三键排序（输出确定）；
+      TotalMatches 记录真实命中数，结果截断到 500 并附
+      `[Results truncated: …]` 通知
+      list_files：os.ReadDir 天然按文件名排序（写入 godoc）+ 500 条上限
+      （MaxListEntries）与截断通知
+      list_code_definition_names：按文件路径排序 + 文件内按行号稳定排序（消除
+      map 遍历顺序泄漏），500 条上限与截断通知
+      交互三件套行为钉死：attempt_completion 必填 result（command 可选）、
+      plan_mode_respond 原样回显、ask_followup_question 走 handler（可注入）
+      并支持“按选项序号作答”
+- [x] 验收：`go test ./... -race` 全绿（7 包）；`go list -m all` 仅本模块
+      （零第三方依赖）；compact 22 个单测（Trim 移植回归 / Summarize 假
+      summarizer / Combo 回退 / 失败矩阵 / 截断上限）、tools 行为测试 24 个、
+      loop 既有 compaction 事件测试继续绿
 
 ### M5 文档与发布
 - [ ] examples：basic / streaming / custom-tool / guard（均可离线 go run）
@@ -86,16 +136,22 @@
 
 ## Current Status
 
-**M2 完成（loop 三段拆分 + ToolGuard + 自动重试 + 全部 Callback 事件，
-**M2 完成（loop 三段拆分 + ToolGuard + 自动重试 + 全部 Callback 事件，
-18 个行为测试 `-race -count=2` 绿；提交 43b31b2 + 654a4db）+ 根包门面
-（5f6e6ca）+ agentcore→cobot 改名清扫（726cdae 及后续清扫提交）完成。**
+**M4 完成（compaction 双策略 + 工具行为定稿）：`compact.Strategy` 接口 +
+Trim（gline 水位修剪移植，60/80 水位、保 system/首条用户消息/最近 6 轮）+
+Summarize（K=6 轮原文保留、五段结构化摘要、120s 超时、空摘要/无 summarizer/
+provider 错误均报错）+ Combo（Summarize 失败或未达标回退 Trim）；loop 默认
+装配 ProviderSummarizer，60%/80% 挂点走策略、事件配对不变；Config 全透传。
+工具侧：execute_command 120s 默认超时 + 进程树击杀 + stdout/stderr 分离 +
+32KB 截断；read_file 64KB/100KB 头截断 + 通知（修死阈值）；write/replace
+原子写（失败不破坏原文件）；search/list/definitions 确定性排序 + 真实计数 +
+截断通知。`go test ./... -race` 全绿，`go list -m all` 零第三方依赖。**
 §10 手术单清退完成：prompts 僵尸工具目录/Skills 段、types/skill_meta.go、
 tools ToolBehavior 系与 init.go 旁路 API 全部删除（净 -272 行）。
 **M3 完成（原生 Anthropic Messages 适配器：SSE 全事件 + thinking 独立通道 +
 cache_control + stop_reason 映射 + HTTPError/Retry-After；29 个测试
 `-race` 绿，provider 覆盖率 95-100%，零第三方依赖）。**
-下一步 M4：compaction（Trim 移植 + Summarize 新写）与工具行为定稿。
+下一步 M5：examples（basic/streaming/custom-tool/guard）+ README 中英 +
+godoc 清理 + Maestro embedded 后端接入。
 
 ## Known Issues / 风险
 
@@ -128,3 +184,24 @@ cache_control + stop_reason 映射 + HTTPError/Retry-After；29 个测试
 | 2026-08-28 | SSE 按 payload 的 type 字段派发，event: 行兜底 | 代理/网关可能剥离 event 行；data 无 type 时才回退 |
 | 2026-08-28 | SSE 解析复用 openai.go 的 isValidJSON/isCompleteJSONObject 括号修复与 partial-chunk 语义 | 两个 provider 行为一致，loop 无需区分 |
 | 2026-08-28 | 模块/仓库改名 agentcore → cobot（go.mod、import、README、包注释、错误前缀全量清扫），系统提示词 agent 身份提为 `Config.AgentName`（默认 "cobot"） | 项目更名与 GitHub 仓库一致；硬编码模型身份不利于复用方品牌化 |
+| 2026-08-29 | compact 以“轮”为压缩单元（一条用户消息 + 其全部响应，含 tool_call↔tool 结果成对），而非逐条消息 | OpenAI 与 Anthropic 两种 wire 格式都要求 tool_use 与 tool_result 相邻；逐条丢弃会产生悬空 tool 结果 |
+| 2026-08-29 | Trim/Summarize 都保护：前置 system 消息 + 首条用户消息（原始任务）+ 最近 KeepRounds(=6) 轮 | 任务描述与 gline 基线的交集；Maestro 长任务依赖最近工作状态与原始目标 |
+| 2026-08-29 | Trim 的丢弃循环用“拼装后消息列表的精确 token 投影（含 notice）”判定停点 | 早期实现只减不增，插回的 notice (~180 token) 会吃掉释放的预算，导致每轮 60% 触发点都再丢一轮（churn）；精确投影一次到位 |
+| 2026-08-29 | compaction 通知/摘要消息用 RoleUser（`[Context compacted:` / `[COMPACTED]` 前缀），不用 RoleSystem | Anthropic Messages API 消息列表禁止 system 角色（会被提升进顶层 system）；连续 user 轮由 API 自动合并，安全 |
+| 2026-08-29 | Summarize.ShouldCompact 在“无待压缩轮”时返回 false，Compact 同样直接返回 | 小预算场景（如 loop 测试 MaxTokens=200）不浪费 ScriptedProvider 轮次，也保证“无 LLM 调用则无副作用” |
+| 2026-08-29 | 默认组合 = Combo(Summarize(ProviderSummarizer), Trim)，失败/未达回退水位即回退；双失败返回合并错误 | 任务要求“任何失败回退 Trim”；loop 把压缩错误记日志继续跑（压缩是优化，不是失败理由），预发送硬修剪兜底 |
+| 2026-08-29 | loop 三挂点分工：预发送 100% = TrimToMaxTokens 硬修剪（无 LLM）；80% AutoCompact 与 60% enforceTokenBudget = 配置的 Strategy | 紧急路径不能承受 LLM 调用的延迟与失败；主循环语义不变，事件配对保持 |
+| 2026-08-29 | loop.ProviderSummarizer 用单次非流式 CreateMessage（MaxTokens 1024），不走路重试机制 | 摘要失败应由 Combo 回退到 Trim 处理；流式/重试机制属于主循环 |
+| 2026-08-29 | execute_command 默认超时 60s → 120s（DefaultCommandTimeoutSeconds），并修复超时杀不掉子进程的问题（Windows taskkill /F /T 进程树 + cmd.WaitDelay=3s） | Maestro Worker 场景跑构建/测试 60s 偏短；cmd.exe 不转发 kill 导致 Run 阻塞到 ping 自然结束（实测 29s） |
+| 2026-08-29 | execute_command 改为分离采集 stdout/stderr（原来是 CombinedOutput 塞进 Stdout） | 输出结构体本就声明两个字段；分离后不再需要 `"\nexit status "` 字符串 hack，模型可区分正常输出与报错 |
+| 2026-08-29 | 命令输出截断 = 每流 32KB，保头 3/4 + 尾 1/4 + `[... output truncated ...]` | 构建错误在尾部、启动横幅在头部；定长上限防止单条工具结果炸上下文 |
+| 2026-08-29 | shell 选择抽成 shellCommand(goos, cmd) 并用测试钉死（windows=cmd /C，其余=sh -c） | 任务要求“确认现状并钉死”；函数化后平台变更必须显式改测试 |
+| 2026-08-29 | read_file 大文件从“拒绝”改为“头截断 + 通知”（64KB 整文件 / 100KB 行区间） | 拒绝迫使模型多一轮往返；头部（imports/类型/首个定义）已够定位，通知给出真实字节数与指路 |
+| 2026-08-29 | 删除 estimateTokensFromBytes(len/2) 阈值 | 该估算法下 4000 token 阈值 ≈ 8KB，使 100KB 字节阈值成为死代码，读任何 >8KB 的源文件都被拒 |
+| 2026-08-29 | write_to_file / replace_in_file 统一走 writeFileAtomic（同目录临时文件 + rename，保留原 mode） | 写失败（磁盘满/权限）不再破坏原文件；rename 同目录保证原子性；读方永远看不到半文件 |
+| 2026-08-29 | replace_in_file 保持“全部块先在内存应用、任一失配整文件不动” | 任务要求 all-or-nothing 回滚语义；与原子写配合天然满足 |
+| 2026-08-29 | 路径不做 workdir 沙箱（维持现状），把 ToolGuard 写成执行点 | gline/Cline 基线语义；沙箱是 v0.2 候选，host 现在就能用 Guard 拦截 |
+| 2026-08-29 | search_files 排序改 sort.SliceStable + (path,line,column) 三键；TotalMatches 记录真实总数（截断只裁 Results） | 并发搜索顺序不定，两键排序同位置结果不稳定；真实计数 + `[Results truncated:` 通知防止模型误以为已看全 |
+| 2026-08-29 | list_code_definition_names 输出按文件路径排序、文件内按行号稳定排序 | 原实现按 map 遍历顺序输出，同样输入每次结果不同，无法用于 diff 类推理 |
+| 2026-08-29 | list_files 依赖 os.ReadDir 的文件名排序并写入 godoc，加 500 条上限 + 通知 | 上限防 node_modules 式目录炸上下文；截断必须可见 |
+| 2026-08-29 | 交互三件套行为用测试钉死（attempt_completion 必填 result；plan_mode_respond 原样回显；ask_followup 走可注入 handler 且支持按选项序号作答） | 任务要求“行为定稿并写入 godoc/README”；未定稿的隐式行为无法被复用方依赖 |

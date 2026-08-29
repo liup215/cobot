@@ -2,10 +2,25 @@
 
 ## 当前工作焦点
 
-**M3 原生 Anthropic Messages 适配器完成**：provider/anthropic.go（传输+SSE
-流式）+ provider/anthropic_wire.go（wire 类型与双向映射），registry 注册
-"anthropic"，29 个 httptest 逐事件断言测试 `-race` 绿，覆盖率 95-100%。
-下一步 **M4：compaction（Trim 移植 + Summarize 新写）与工具行为定稿**。
+**M4 完成（compaction 双策略 + 工具行为定稿）**：
+- compact 包新建：`Strategy` 接口 + `Trim`（gline 水位修剪移植，60/80 水位、
+  保 system/首条用户消息/最近 6 轮）+ `Summarize`（K=6、五段结构化摘要、
+  120s 超时、空摘要/无 summarizer/超时均报错）+ `Combo`（Summarize 失败或
+  未把会话压到回退水位以下即回退 Trim；双失败合并错误，loop 记日志继续跑）。
+- loop 接线：`Options.Compaction/Summarizer/SummarizePrompt`，默认
+  `Combo(Summarize(ProviderSummarizer), Trim)`；60% 预算触发点与 80% 挂点改走
+  策略，预发送 100% 仍是 `TrimToMaxTokens` 硬修剪，`OnCompactionStart/End`
+  配对不变；`Compact()` 手动触发改走策略并返回"是否真的压缩了"。
+- 根包门面：`Config.Compaction/Summarizer/SummarizePrompt` + aliases.go 再导出。
+- 工具行为定稿（tests 钉死，见 tools/behavior_test.go）：execute_command
+  120s 默认超时 + 进程树击杀（修 Windows 29s 挂起）+ stdout/stderr 分离 +
+  32KB 截断 + shellCommand() 钉死；read_file 64KB/100KB 头截断 + 通知
+  （修 4000 token 死阈值）；write/replace 原子写（writeFileAtomic，失败不破坏
+  原文件）；search_files 稳定三键排序 + 真实 TotalMatches + 截断通知；
+  list_files/definitions 上限与确定性输出；交互三件套行为钉死。
+- 验收：`go test ./... -race` 全绿、`go list -m all` 仅本模块。
+下一步 **M5：examples（basic/streaming/custom-tool/guard）+ README 中英 +
+godoc 清理 + Maestro embedded 后端接入 → tag v0.1.0**。
 
 **已知残留（有意保留，超出本次点名范围且删除会改行为）**：
 loop/stream.go:173 预派发副作用白名单 case 里列有 "kb_ingest"/"browser_copy"
@@ -14,6 +29,51 @@ loop/stream.go:173 预派发副作用白名单 case 里列有 "kb_ingest"/"brows
 
 
 ## 近期变更
+
+- 2026-08-29：**M4 compaction 双策略完成**：
+  - compact/compact.go（新）：`Strategy` 接口（ShouldCompact + Compact；就地
+    重写、可重复调用、错误=“本策略未生效”供 Combo 回退）、`Round`/
+    `SplitRounds`（轮=用户消息+其响应；assistant tool_call 与 tool 结果永不分家；
+    前置 system 不属于任何轮）、默认值常量（KeepRounds=6、60/80 水位、
+    SummarizeTimeout=120s、MaxSummaryTokens=2000、MaxTranscriptTokens=24000）、
+    哨兵错误 ErrNoSummarizer/ErrEmptySummary。
+  - compact/trim.go（新）：水位修剪移植；丢弃循环用"拼装后消息列表的精确 token
+    投影（含 notice）"决定丢几轮（早期"只减不增"算法被回插 notice 吃掉释放
+    预算，会反复触发）；仍超 80% 回落 `Conversation.TrimToMaxTokens`。
+  - compact/summarize.go（新）：转录渲染（user/assistant/tool result 标注、
+    tool_call→tool 名映射、单条 2000 字符上限、newest-first 预算适配）、
+    五段默认提示词（可覆盖）、120s 超时、摘要/转录双上限。
+  - compact/combo.go（新）：主策略失败或未把会话压到回退水位以下 → 回退；
+    双失败返回合并错误。
+  - loop/summarizer.go（新）：`ProviderSummarizer`（单次非流式 CreateMessage，
+    MaxTokens 1024），复用会话 provider，不走流重试。
+  - loop/agent.go：Options/BaseAgent 增 compaction；`runCompaction`（nil 策略
+    保留 legacy `AutoCompact()`）；`Compact()` 返回是否真的压缩。
+  - types/conversation.go：新增 `ReplaceMessages`（就地换历史 + 重估 token +
+    清 actual tokens）与导出 `MessageTokens`。
+  - compact/compact_test.go（22 个）：SplitRounds 边界、Trim 移植回归
+    （保 system/任务/最近 K 轮、水位以下不动、幂等、硬修剪回落、配置项）、
+    Summarize（替换/转录内容/提示词覆盖/失败矩阵/上限）、Combo（回退/跳过/
+    双失败合并/ShouldCompact OR 语义/默认装配）。
+- 2026-08-29：**M4 工具行为定稿完成**（tools/behavior_test.go 24 个测试钉死）：
+  - execute_command：默认超时 60s→120s；`configureProcessKill`（Windows
+    taskkill /F /T 进程树 + cmd.WaitDelay=3s）修掉"超时后 Run 仍阻塞到
+    ping 自然结束（实测 29s）"；stdout/stderr 分离采集（去掉
+    `"\nexit status "` hack）；`truncateCommandOutput` 每流 32KB 保头 3/4 +
+    尾 1/4；shell 选择抽成 `shellCommand(goos, cmd)` 并钉死。
+  - read_file：大文件从"拒绝"改"头截断 + 通知"（64KB 整文件 / 100KB 区间）；
+    删除 estimateTokensFromBytes(len/2) 阈值（其 4000 token 阈值 ≈ 8KB，
+    使 100KB 阈值成死代码）。
+  - write_to_file / replace_in_file：`writeFileAtomic`（同目录临时文件 +
+    rename + 保留原 mode + fsync）；replace 保持 all-or-nothing。
+  - search_files：`sort.SliceStable` + (path,line,column) 三键；
+    `Truncated` 字段 + 真实 TotalMatches + `[Results truncated:` 通知。
+  - list_files：`listFilesUpTo` 500 条上限 + 通知；os.ReadDir 排序语义写入
+    godoc。list_code_definition_names：文件路径排序 + 行内稳定排序 +
+    500 条上限通知（修 map 遍历顺序泄漏）。
+  - 交互三件套：attempt_completion 必填 result / plan_mode_respond 回显 /
+    ask_followup handler + 选项序号映射，全部有测试。
+- 2026-08-28：**M3 Anthropic 适配器完成**：
 
 - 2026-08-28：**M3 Anthropic 适配器完成**：
   - provider/anthropic.go（~680 行）：NewAnthropicProvider（key 空则读
@@ -141,11 +201,10 @@ loop/stream.go:173 预派发副作用白名单 case 里列有 "kb_ingest"/"brows
 
 ## 下一步（按里程碑顺序）
 
-1. **M4 compaction 与工具集**：
-   - compact.Strategy 接口 + Trim（移植 gline）+ Summarize（新写，K=6 轮）。
-   - 默认组合：Summarize 失败回退 Trim。
-   - 工具行为定稿（截断/超时/大文件策略；list_code_definition_names 去留）。
-2. **M5**：examples + README 中英 + Maestro embedded 验证 → tag v0.1.0。
+1. **M5 文档与发布**：
+   - examples：basic / streaming / custom-tool / guard（均可离线 go run）。
+   - README 中英 + godoc 清理（README 已含 compaction 与工具行为表，可作底稿）。
+   - Maestro embedded 后端接入（runner 新后端与 claude/pi 并列）→ tag v0.1.0。
 
 ## 活跃决策
 
@@ -161,6 +220,15 @@ loop/stream.go:173 预派发副作用白名单 case 里列有 "kb_ingest"/"brows
 - **工具集定稿（M4 部分）**：list_code_definition_names 保留并注册（默认
   Registry 共 10 个工具）；提示词提及的每个工具必须有对应注册项，由
   loop/prompt_guard_test.go 强制。
+- **compaction 默认 = Combo(Summarize(ProviderSummarizer), Trim)**（M4 定稿）：
+  压缩单元是"轮"（保 tool_call↔tool 结果成对）；Trim/Summarize 都保护
+  system + 首条用户消息 + 最近 6 轮；通知/摘要用 RoleUser（Anthropic 消息
+  列表禁止 system 角色，连续 user 轮由 API 合并）；无待压缩轮不花 LLM 调用；
+  紧急路径（预发送 100%、80% 挂点的硬修剪）永不调 LLM。
+- **工具行为（M4 定稿）**：execute_command 120s + 进程树击杀 + 32KB/流截断 +
+  cmd /C 与 sh -c 钉死；read_file 64KB/100KB 头截断 + 通知；write/replace
+  原子写（writeFileAtomic）；search/list/definitions 确定性排序 + 500 条上限 +
+  截断通知；路径不做 workdir 沙箱（ToolGuard 是执行点，沙箱 v0.2 候选）。
 - **Anthropic thinking 不回传**：Messages API 要求 thinking 块与其加密
   签名成对出现且仅在请求开启 thinking 时合法，内部 types.Message 不携带
   签名 → convertMessagesToAnthropic 丢弃 ReasoningContent（v0.2 候选：

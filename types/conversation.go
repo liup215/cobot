@@ -316,6 +316,24 @@ func (c *Conversation) AutoCompact() {
 	c.updateTokenCount()
 }
 
+// ReplaceMessages swaps the conversation's messages for msgs and re-estimates
+// the token count. Compaction strategies use it to rewrite history in place.
+// Real API-reported token usage is reset because it no longer describes the
+// replaced history.
+func (c *Conversation) ReplaceMessages(msgs []Message) {
+	if msgs == nil {
+		msgs = make([]Message, 0)
+	}
+	c.Messages = msgs
+	c.updateTokenCount()
+	c.ResetActualTokens()
+}
+
+// MessageTokens returns the estimated token count of a single message,
+// including its role, reasoning content and tool calls. Compaction
+// strategies use it to account for dropped or inserted messages.
+func MessageTokens(m Message) int { return messageTokens(m) }
+
 // IsTokenAboveThreshold checks if current tokens exceed the given
 // threshold percentage of MaxTokens.
 func (c *Conversation) IsTokenAboveThreshold(percent int) bool {
