@@ -128,14 +128,45 @@
       summarizer / Combo 回退 / 失败矩阵 / 截断上限）、tools 行为测试 24 个、
       loop 既有 compaction 事件测试继续绿
 
-### M5 文档与发布
-- [ ] examples：basic / streaming / custom-tool / guard（均可离线 go run）
+### M4 审查修复（M4 review fix）— 完成
+- [x] 阻塞缺陷修复：compact.Summarize 任务消息重复。历史不以 user 消息开头时
+      （预发送硬修剪删掉首轮，或从 Store 恢复的 assistant/tool 开头会话），
+      首条用户消息落在保留窗口起点（firstUser == cut），Compact() 曾把它
+      既留在 body[cut:] 又再插到摘要前——实测复现：
+      [system, assistant, user(task), assistant] + KeepRounds=1 →
+      [system, user(task), [COMPACTED]…, user(task), assistant]。
+      守卫收紧为 `firstUser >= 0 && firstUser < cut`（与构造 dropped 的
+      循环同边界，compact/summarize.go）
+- [x] Trim.dropOldestRounds 同边界确认正确（candidate 循环 `i < cut` 天然
+      满足），并补同场景回归测试钉住 parity
+- [x] 回归测试（compact/compact_test.go）：assistant 开头历史（firstUser==cut
+      边界，测试内自校验）、从 Store 恢复的 tool_call 开头历史（工具轮整体进
+      转录，永不分家）、firstUser < cut 分支（任务消息应原样保留且仅一次）；
+      全部断言任务消息只出现一次
+- [x] loop/compaction_test.go（新）：注入自定义 Strategy，钉住 60% 预算挂点
+      （enforceTokenBudget）会把 Options.Compaction 跑在活会话上（预算按
+      system prompt + 工具描述开销精确取值，隔离出 60% 挂点、避开 80%/100%
+      两个挂点）；变异验证过（注释掉 runCompaction 调用测试即红）
+- [x] 建议项落地：字节截断改 rune 边界安全（tools/utf8.go 新增
+      truncateUTF8Prefix/truncateUTF8Suffix，切割点回退/前进到 rune 边界，
+      至多让出 3 字节）：execute_command 32KB 头尾切割、read_file 64KB 整文件
+      与 100KB 行区间三处，截断通知改报“实际展示字节数”（不再写死阈值）；
+      中文/emoji 输出不再在截断边缘产生 U+FFFD（utf8_test.go 全覆盖）
+- [x] 验收：`go test ./... -race -count=2` 全绿（7 包）；`go list -m all`
+      仅本模块；gofmt/vet 干净
+
+### M5 文档与发布- [ ] examples：basic / streaming / custom-tool / guard（均可离线 go run）
 - [ ] README 中英 + godoc 清理
 - [ ] Maestro embedded 后端接入（runner 新后端与 claude/pi 并列）
 - [ ] v0.1.0 tag + `gh release create`
 
 ## Current Status
 
+**M4 审查修复完成（2026-08-30）：compact.Summarize 任务消息重复（历史不以
+user 开头时首条用户消息出现两次）已修（`firstUser < cut` 守卫 + 回归测试）；
+loop 60% 挂点对注入 Strategy 的接线补了测试（变异验证有效）；execute_command
+与 read_file 三处字节截断改 rune 边界安全（中文输出不再产生 U+FFFD）。
+`go test ./... -race -count=2` 全绿，`go list -m all` 零第三方依赖。**
 **M4 完成（compaction 双策略 + 工具行为定稿）：`compact.Strategy` 接口 +
 Trim（gline 水位修剪移植，60/80 水位、保 system/首条用户消息/最近 6 轮）+
 Summarize（K=6 轮原文保留、五段结构化摘要、120s 超时、空摘要/无 summarizer/
@@ -205,3 +236,5 @@ godoc 清理 + Maestro embedded 后端接入。
 | 2026-08-29 | list_code_definition_names 输出按文件路径排序、文件内按行号稳定排序 | 原实现按 map 遍历顺序输出，同样输入每次结果不同，无法用于 diff 类推理 |
 | 2026-08-29 | list_files 依赖 os.ReadDir 的文件名排序并写入 godoc，加 500 条上限 + 通知 | 上限防 node_modules 式目录炸上下文；截断必须可见 |
 | 2026-08-29 | 交互三件套行为用测试钉死（attempt_completion 必填 result；plan_mode_respond 原样回显；ask_followup 走可注入 handler 且支持按选项序号作答） | 任务要求“行为定稿并写入 godoc/README”；未定稿的隐式行为无法被复用方依赖 |
+| 2026-08-30 | Summarize 的任务消息回插守卫收紧为 `firstUser >= 0 && firstUser < cut`（与构造 dropped 集合的循环同边界） | 历史不以 user 开头时首条用户消息落在保留窗口起点，旧守卫会把它既留在 body[cut:] 又插到摘要前（任务消息出现两次）；Trim 的对应循环本就按该边界处理，补测试钉住 parity |
+| 2026-08-30 | 字节截断改 rune 边界安全：tools/utf8.go 的 truncateUTF8Prefix/Suffix 供 execute_command（32KB 头尾）与 read_file（64KB 整文件 / 100KB 行区间）三处使用；截断通知改报实际展示字节数 | 普通字节切割会在 64KB/100KB/32KB 边界把中文/emoji 劈成 U+FFFD 污染模型上下文；回退切割点至多让出 3 字节，字节上限语义保持 |

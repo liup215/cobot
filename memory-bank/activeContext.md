@@ -2,6 +2,25 @@
 
 ## 当前工作焦点
 
+**M4 审查修复完成（2026-08-30）**：
+- compact/summarize.go Compact() 的任务消息回插守卫收紧为
+  `firstUser >= 0 && firstUser < cut`：历史不以 user 消息开头（预发送硬修剪
+  删掉首轮，或 Store 恢复的 assistant/tool 开头会话）时，首条用户消息落在
+  保留窗口起点（firstUser == cut），旧代码会把它既留在 body[cut:] 又插到
+  摘要前——任务消息出现两次。实测复现过，修后由 4 个回归测试钉住
+  （assistant 开头边界 / tool_call 开头的 Store 恢复 / firstUser<cut 分支 /
+  Trim 同场景 parity）。
+- loop/compaction_test.go（新）：钉住 60% 预算挂点（enforceTokenBudget）
+  会把注入的 Options.Compaction 跑在活会话上；预算按 system prompt +
+  工具描述开销精确取值，隔离出 60% 挂点（避开 80% AutoCompact 与 100%
+  预发送硬修剪）。变异验证：注释掉 runCompaction 调用 → 测试红。
+- tools/utf8.go（新）truncateUTF8Prefix/Suffix：execute_command 32KB 头尾
+  切割与 read_file 64KB 整文件 / 100KB 行区间三处改 rune 边界安全（切割点
+  回退/前进至多 3 字节），截断通知改报实际展示字节数；中文/emoji 不再在
+  截断边缘变 U+FFFD（tools/utf8_test.go 全覆盖）。
+- 验收：`go test ./... -race -count=2` 全绿；`go list -m all` 仅本模块；
+  gofmt/vet 干净。
+
 **M4 完成（compaction 双策略 + 工具行为定稿）**：
 - compact 包新建：`Strategy` 接口 + `Trim`（gline 水位修剪移植，60/80 水位、
   保 system/首条用户消息/最近 6 轮）+ `Summarize`（K=6、五段结构化摘要、
@@ -30,6 +49,10 @@ loop/stream.go:173 预派发副作用白名单 case 里列有 "kb_ingest"/"brows
 
 ## 近期变更
 
+- 2026-08-30：**M4 审查修复**：Summarize 任务消息重复（`firstUser < cut`
+  守卫 + compact_test 4 个回归）、loop 60% 挂点接线测试
+  （loop/compaction_test.go，含变异验证）、工具字节截断 rune 边界安全
+  （tools/utf8.go + utf8_test.go，通知改报实际字节数）。
 - 2026-08-29：**M4 compaction 双策略完成**：
   - compact/compact.go（新）：`Strategy` 接口（ShouldCompact + Compact；就地
     重写、可重复调用、错误=“本策略未生效”供 Combo 回退）、`Round`/

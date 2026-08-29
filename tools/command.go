@@ -221,18 +221,17 @@ func joinNonEmpty(parts ...string) string {
 }
 
 // truncateCommandOutput caps output at MaxCommandOutputBytes, keeping the head
-// and the tail of the stream with an omission marker in between.
+// and the tail of the stream with an omission marker in between. The head and
+// tail cuts are moved to rune boundaries so multi-byte output (Chinese text,
+// emoji) is never turned into U+FFFD at the truncation edges.
 func truncateCommandOutput(s string) string {
 	const marker = "\n[... output truncated ...]\n"
 	if len(s) <= MaxCommandOutputBytes {
 		return s
 	}
-	head := MaxCommandOutputBytes * 3 / 4
-	tail := MaxCommandOutputBytes - head - len(marker)
-	if tail < 0 {
-		tail = 0
-	}
-	return s[:head] + marker + s[len(s)-tail:]
+	head := truncateUTF8Prefix(s, MaxCommandOutputBytes*3/4)
+	tail := truncateUTF8Suffix(s, MaxCommandOutputBytes-len(head)-len(marker))
+	return head + marker + tail
 }
 
 // IsDestructiveCommand checks if a command might be destructive

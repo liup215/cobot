@@ -564,6 +564,235 @@ func TestSummarizeCaps(t *testing.T) {
 	})
 }
 
+// ─── Summarize: task-message duplication in non-user-first histories ────────
+
+// TestSummarizeAssistantFirstHistoryDoesNotDuplicateTask pins the M4 review
+// fix. A conversation whose first body message is not a user message (the
+// pre-send hard trim removed the original turn, or the session was restored
+// from the store) puts the task message at the start of the retained window:
+// firstUser == cut. Before the fix the task was kept there AND re-inserted
+// ahead of the summary, so it appeared twice:
+//
+//	[system, assistant, user(task), assistant] + KeepRounds=1
+//	  → [system, user(task), [COMPACTED]…, user(task), assistant]
+func TestSummarizeAssistantFirstHistoryDoesNotDuplicateTask(t *testing.T) {
+	exactEstimator(t)
+
+	conv := buildConv(2500,
+		types.Message{Role: types.RoleSystem, Content: sysContent},
+		types.Message{Role: types.RoleAssistant, Content: "intro assistant turn"},
+		types.Message{Role: types.RoleUser, Content: taskContent},
+		types.Message{Role: types.RoleAssistant, Content: "working on it"},
+	)
+
+	// The setup must genuinely sit on the boundary the fix guards: the task
+	// message is the first message of the retained window (firstUser == cut).
+	body := conv.Messages[1:]
+	if cut := compactableCut(body, 1); firstUserMessage(body) != cut {
+		t.Fatalf("test setup: expected firstUser == cut (%d), got %d", cut, firstUserMessage(body))
+	}
+
+	fake := &fakeSummarizer{summary: "Task goal: fix the login bug"}
+	strategy := &Summarize{Summarizer: fake, KeepRounds: 1}
+	if err := strategy.Compact(context.Background(), conv); err != nil {
+		t.Fatalf("Compact returned error: %v", err)
+	}
+
+	after := conv.Messages
+	want := []types.Message{
+		{Role: types.RoleSystem, Content: sysContent},
+		{Role: types.RoleUser, Content: "[COMPACTED] " + fake.summary},
+		{Role: types.RoleUser, Content: taskContent},
+		{Role: types.RoleAssistant, Content: "working on it"},
+	}
+	if len(after) != len(want) {
+		t.Fatalf("compacted history has %d messages, want %d: %+v", len(after), len(want), after)
+	}
+	for i, w := range want {
+		if after[i].Role != w.Role {
+			t.Errorf("message %d role = %s, want %s", i, after[i].Role, w.Role)
+		}
+		if w.Role == types.RoleUser && strings.HasPrefix(w.Content, "[COMPACTED]") {
+			if !strings.HasPrefix(after[i].Content, "[COMPACTED]") || !strings.Contains(after[i].Content, fake.summary) {
+				t.Errorf("message %d = %.80q, want the summary message", i, after[i].Content)
+			}
+			continue
+		}
+		if after[i].Content != w.Content {
+			t.Errorf("message %d = %q, want %q", i, after[i].Content, w.Content)
+		}
+	}
+
+	if n := strings.Count(messagesText(after), taskContent); n != 1 {
+		t.Errorf("task message appears %d times, want exactly 1", n)
+	}
+	if strings.Contains(messagesText(after), "intro assistant turn") {
+		t.Error("the dropped assistant turn should only live in the transcript, not in the history")
+	}
+	if !strings.Contains(fake.prompts[0], "intro assistant turn") {
+		t.Error("the dropped assistant turn should be part of the summarizer transcript")
+	}
+}
+
+// TestSummarizeRestoredToolFirstHistoryDoesNotDuplicateTask covers the
+// store-restore variant of the same boundary: the history opens with an
+// assistant tool_call and its result, so the task message again sits at
+// firstUser == cut. The dropped tool round must move into the transcript as a
+// whole — the assistant tool_call and its tool result are never separated.
+func TestSummarizeRestoredToolFirstHistoryDoesNotDuplicateTask(t *testing.T) {
+	exactEstimator(t)
+
+	conv := buildConv(2500,
+		types.Message{Role: types.RoleSystem, Content: sysContent},
+		types.Message{Role: types.RoleAssistant, Content: "reading the file",
+			ToolCalls: []types.ToolCall{{ID: "call-1", Name: "read_file", Input: []byte(`{"path":"a.go"}`)}},
+		},
+		types.Message{Role: types.RoleTool, ToolCallID: "call-1", Content: "package main\nfunc main() {}"},
+		types.Message{Role: types.RoleUser, Content: taskContent},
+		types.Message{Role: types.RoleAssistant, Content: "working on it"},
+	)
+
+	fake := &fakeSummarizer{summary: "summary text"}
+	strategy := &Summarize{Summarizer: fake, KeepRounds: 1}
+	if err := strategy.Compact(context.Background(), conv); err != nil {
+		t.Fatalf("Compact returned error: %v", err)
+	}
+
+	after := conv.Messages
+	if len(after) != 4 {
+		t.Fatalf("compacted history has %d messages, want 4: %+v", len(after), after)
+	}
+	if after[0].Role != types.RoleSystem || after[0].Content != sysContent {
+		t.Errorf("system message not preserved first: %+v", after[0])
+	}
+	if after[1].Role != types.RoleUser || !strings.HasPrefix(after[1].Content, "[COMPACTED]") {
+		t.Errorf("expected the summary message at index 1, got %+v", after[1])
+	}
+	if after[2].Role != types.RoleUser || after[2].Content != taskContent {
+		t.Errorf("the task message must survive exactly once after the summary, got %+v", after[2])
+	}
+	if after[3].Role != types.RoleAssistant || after[3].Content != "working on it" {
+		t.Errorf("the retained round must stay verbatim, got %+v", after[3])
+	}
+	if n := strings.Count(messagesText(after), taskContent); n != 1 {
+		t.Errorf("task message appears %d times, want exactly 1", n)
+	}
+	// The tool call and its result were summarized together, never separated.
+	for _, want := range []string{"-> tool_call read_file(", "func main() {}"} {
+		if !strings.Contains(fake.prompts[0], want) {
+			t.Errorf("transcript missing %q", want)
+		}
+	}
+}
+
+// TestSummarizeTaskInsideDroppedRangePreservedOnce covers the other side of
+// the guard: with a non-user opening and several dropped rounds the task
+// message sits strictly inside the dropped range (firstUser < cut) and must be
+// re-inserted ahead of the summary — exactly once.
+func TestSummarizeTaskInsideDroppedRangePreservedOnce(t *testing.T) {
+	exactEstimator(t)
+
+	conv := buildConv(2500,
+		types.Message{Role: types.RoleSystem, Content: sysContent},
+		types.Message{Role: types.RoleAssistant, Content: "intro assistant turn"},
+		types.Message{Role: types.RoleUser, Content: taskContent},
+		types.Message{Role: types.RoleAssistant, Content: "ack"},
+		types.Message{Role: types.RoleUser, Content: "round-2 question"},
+		types.Message{Role: types.RoleAssistant, Content: "round-2 answer"},
+	)
+
+	fake := &fakeSummarizer{summary: "summary text"}
+	strategy := &Summarize{Summarizer: fake, KeepRounds: 1}
+	if err := strategy.Compact(context.Background(), conv); err != nil {
+		t.Fatalf("Compact returned error: %v", err)
+	}
+
+	after := conv.Messages
+	want := []struct {
+		role    types.Role
+		content string
+	}{
+		{types.RoleSystem, sysContent},
+		{types.RoleUser, taskContent},
+		{types.RoleUser, "[COMPACTED]"},
+		{types.RoleUser, "round-2 question"},
+		{types.RoleAssistant, "round-2 answer"},
+	}
+	if len(after) != len(want) {
+		t.Fatalf("compacted history has %d messages, want %d: %+v", len(after), len(want), after)
+	}
+	for i, w := range want {
+		if after[i].Role != w.role {
+			t.Errorf("message %d role = %s, want %s", i, after[i].Role, w.role)
+		}
+		if w.content != "[COMPACTED]" && after[i].Content != w.content {
+			t.Errorf("message %d = %q, want %q", i, after[i].Content, w.content)
+		}
+		if w.content == "[COMPACTED]" && !strings.HasPrefix(after[i].Content, "[COMPACTED]") {
+			t.Errorf("message %d = %.60q, want the summary message", i, after[i].Content)
+		}
+	}
+	if n := strings.Count(messagesText(after), taskContent); n != 1 {
+		t.Errorf("task message appears %d times, want exactly 1", n)
+	}
+}
+
+// messagesText concatenates the message contents so occurrence counts can be
+// asserted without caring which message a text landed in.
+func messagesText(msgs []types.Message) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		b.WriteString(m.Content)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// TestTrimAssistantFirstHistoryKeepsTaskOnce pins the same boundary on the
+// Trim side: its round-dropping loop already guarded firstUser against cut,
+// and this keeps that parity from regressing while Summarize's is fixed.
+func TestTrimAssistantFirstHistoryKeepsTaskOnce(t *testing.T) {
+	exactEstimator(t)
+
+	msgs := []types.Message{
+		{Role: types.RoleSystem, Content: sysContent},
+		{Role: types.RoleAssistant, Content: "intro assistant turn"},
+		{Role: types.RoleUser, Content: taskContent},
+	}
+	msgs = append(msgs, fillerRounds(6, 100)...)
+	conv := buildConv(2000, msgs...)
+	if !conv.IsTokenAboveThreshold(60) {
+		t.Fatalf("test setup: conversation should start above the 60%% watermark, have %d tokens", conv.GetTotalTokens())
+	}
+
+	strategy := &Trim{KeepRounds: 1}
+	if err := strategy.Compact(context.Background(), conv); err != nil {
+		t.Fatalf("Compact returned error: %v", err)
+	}
+
+	after := conv.Messages
+	if len(after) < 4 {
+		t.Fatalf("compacted history too short: %+v", after)
+	}
+	if after[0].Role != types.RoleSystem || after[0].Content != sysContent {
+		t.Errorf("system message not preserved first: %+v", after[0])
+	}
+	// The task message is protected even though its round was dropped: it is
+	// re-inserted before the notice, and only once.
+	if after[1].Role != types.RoleUser || after[1].Content != taskContent {
+		t.Errorf("task message not preserved right after the system prompt: %+v", after[1])
+	}
+	if !strings.HasPrefix(after[2].Content, "[Context compacted:") {
+		t.Errorf("expected the compaction notice at index 2, got %.80q", after[2].Content)
+	}
+	if n := strings.Count(messagesText(after), taskContent); n != 1 {
+		t.Errorf("task message appears %d times, want exactly 1", n)
+	}
+	if strings.Contains(messagesText(after), "intro assistant turn") {
+		t.Error("the assistant-only opening round should have been dropped")
+	}
+}
+
 // ─── Combo ───────────────────────────────────────────────────────────────────
 
 // TestComboFallsBackWhenSummarizationFails is the acceptance case: any

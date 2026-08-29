@@ -109,10 +109,12 @@ func (t *ReadFileTool) Execute(ctx context.Context, input json.RawMessage) (stri
 			return "", fmt.Errorf("invalid line range: %w", err)
 		}
 		// Even for ranges, enforce a byte cap so an enormous range cannot
-		// explode the context.
+		// explode the context. The cut backs off to a rune boundary so a
+		// multi-byte character is never split in half.
 		if len(sliced) > MaxReadRangeBytes {
+			head := truncateUTF8Prefix(string(sliced), MaxReadRangeBytes)
 			return fmt.Sprintf("%s\n\n[Range truncated: requested lines %d-%d, %d bytes total, showing first %d bytes. Re-read with a narrower range for the rest.]",
-				sliced[:MaxReadRangeBytes], start, end, len(sliced), MaxReadRangeBytes), nil
+				head, start, end, len(sliced), len(head)), nil
 		}
 		return fmt.Sprintf("[Lines %d-%d of %s]\n%s", start, end, path, string(sliced)), nil
 	}
@@ -123,10 +125,11 @@ func (t *ReadFileTool) Execute(ctx context.Context, input json.RawMessage) (stri
 	// did not see.
 	if len(content) > MaxReadFileBytes {
 		lineCount := countLines(content)
+		head := truncateUTF8Prefix(string(content), MaxReadFileBytes)
 		return fmt.Sprintf(
 			"%s\n\n[File truncated: %s is %d bytes and %d lines, showing the first %d bytes. "+
 				"Use start_line/end_line for a specific range or search_files to locate sections.]",
-			content[:MaxReadFileBytes], path, len(content), lineCount, MaxReadFileBytes,
+			head, path, len(content), lineCount, len(head),
 		), nil
 	}
 

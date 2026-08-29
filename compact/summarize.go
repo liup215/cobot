@@ -200,8 +200,13 @@ func (s *Summarize) Compact(ctx context.Context, conv *types.Conversation) error
 
 	msgs := make([]types.Message, 0, len(conv.Messages))
 	msgs = append(msgs, conv.Messages[:sys]...)
-	if firstUser >= 0 {
-		// The original task survives verbatim, ahead of the summary.
+	// The original task survives verbatim, ahead of the summary — but only
+	// when it actually sat in the dropped range, the same boundary the dropped
+	// set was built with. When the history does not open with a user message
+	// (a hard pre-send trim removed the original turn, or the session was
+	// restored from the store), firstUser >= cut: the task is already part of
+	// the retained window and re-inserting it here would duplicate it.
+	if firstUser >= 0 && firstUser < cut {
 		msgs = append(msgs, body[firstUser])
 	}
 	msgs = append(msgs, types.Message{
