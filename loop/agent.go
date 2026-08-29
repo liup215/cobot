@@ -49,13 +49,14 @@ const (
 
 // Agent is the core interface for the AI programming assistant
 type Agent interface {
-	// Run starts the Agent with a user prompt
-	// This will initiate the conversation loop with the LLM
-	Run(ctx context.Context, prompt string) error
+	// Run starts the Agent with a user prompt and no streaming callback.
+	// It returns the structured outcome of the run; see RunWithCallback.
+	Run(ctx context.Context, prompt string) (*RunResult, error)
 
-	// RunWithCallback starts the Agent with a user prompt and a callback for streaming updates
-	// This is used for TUI mode to receive real-time updates
-	RunWithCallback(ctx context.Context, prompt string, callback StreamCallback) error
+	// RunWithCallback starts the Agent with a user prompt and a callback for streaming updates.
+	// This is used for TUI mode to receive real-time updates.
+	// It returns the structured outcome of the run; see BaseAgent.RunWithCallback.
+	RunWithCallback(ctx context.Context, prompt string, callback StreamCallback) (*RunResult, error)
 
 	// SetMode switches between Plan and Act modes
 	SetMode(mode Mode) error
@@ -96,11 +97,21 @@ type Options struct {
 	// MaxConsecutiveMistakes limits consecutive errors before stopping
 	MaxConsecutiveMistakes int
 
-	// CustomRules is extra text appended to the system prompt
+	// CustomRules is extra text appended to the system prompt.
+	// Ignored while SystemPromptOverride is set.
 	CustomRules string
+
+	// SystemPromptOverride completely replaces the default system prompt when
+	// non-empty (role, sections, tool catalogue prose and CustomRules are all
+	// dropped). The AVAILABLE TOOLS section — the tool names, descriptions and
+	// input schemas of the current mode, which the model must be able to see
+	// — is still rendered by the loop and appended to the override text (see
+	// prompts.ApplySystemPromptOverride). Empty = default prompt.
+	SystemPromptOverride string
 
 	// AgentName is the agent identity announced in the system prompt's
 	// role section ("You are <AgentName>, ..."). Empty = prompts.DefaultAgentName.
+	// Ignored while SystemPromptOverride is set.
 	AgentName string
 
 	// Store is the optional persistent storage for conversation history
@@ -137,6 +148,7 @@ type BaseAgent struct {
 	maxConsecutiveMistakes int
 	consecutiveMistakes    int
 	customRules            string
+	systemPromptOverride   string
 	agentName              string
 
 	guard      ToolGuard // optional approval gate for tool calls
@@ -156,6 +168,10 @@ type BaseAgent struct {
 	// so the main loop can avoid calling OnToolCallStart twice for the same call.
 	preDispatchedIDsMu sync.Mutex
 	preDispatchedIDs   map[string]bool
+	// preDispatchWG tracks in-flight pre-dispatch goroutines so RunWithCallback
+	// can await them before returning: no agent-owned goroutine outlives a run,
+	// which is what makes context cancellation leak-free.
+	preDispatchWG sync.WaitGroup
 }
 
 // preDispatchedResult holds the outcome of a tool call that was launched
@@ -206,6 +222,7 @@ func New(opts Options) (*BaseAgent, error) {
 		autoApprove:            opts.AutoApprove,
 		maxConsecutiveMistakes: maxMistakes,
 		customRules:            opts.CustomRules,
+		systemPromptOverride:   opts.SystemPromptOverride,
 		agentName:              agentName,
 		guard:                  opts.Guard,
 		store:                  opts.Store,
@@ -214,26 +231,62 @@ func New(opts Options) (*BaseAgent, error) {
 	}, nil
 }
 
-// Run starts the Agent with a user prompt
-func (a *BaseAgent) Run(ctx context.Context, prompt string) error {
+// Run starts the Agent with a user prompt and no streaming callback. It is
+// RunWithCallback with a no-op callback; see that method for the semantics of
+// the returned *RunResult and error.
+func (a *BaseAgent) Run(ctx context.Context, prompt string) (*RunResult, error) {
 	// Use the no-op adapter for non-streaming scenarios
 	return a.RunWithCallback(ctx, prompt, &StreamCallbackAdapter{})
 }
 
-// RunWithCallback starts the Agent with a user prompt and a callback for streaming updates
-func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback StreamCallback) error {
+// RunWithCallback starts the Agent with a user prompt and a callback for
+// streaming updates.
+//
+// It returns the structured outcome of the run (RunResult) together with the
+// terminal error:
+//
+//   - the result is non-nil for every run except a rejected "agent is
+//     already running" call, so hosts can report partial progress (tokens
+//     spent, turns served, best-effort final text) even when the run fails
+//     or is canceled;
+//   - the error is nil when the run ended normally: a terminal tool call
+//     (attempt_completion / plan_mode_respond) or a host-called Abort();
+//   - a canceled or expired ctx surfaces as an error wrapping
+//     context.Canceled / context.DeadlineExceeded, so errors.Is works;
+//   - every other failure (stream error, consecutive-mistakes limit)
+//     surfaces verbatim. RunResult.Err always mirrors the error.
+//
+// Cancellation semantics: when ctx is done the loop stops reading the
+// provider stream, stops executing tools (including in-flight pre-dispatch
+// goroutines, which are awaited before returning) and stops issuing new LLM
+// requests; the interrupted turn is not recorded in the conversation.
+// Abort() remains the separate, non-error cancellation channel.
+func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback StreamCallback) (*RunResult, error) {
 	if a.running {
-		return fmt.Errorf("agent is already running")
+		return nil, fmt.Errorf("agent is already running")
 	}
 
 	a.running = true
 	a.abort.Store(false)
-	// Ensure running is always reset, even on panic.
+	// Ensure running is always reset, even on panic. In-flight pre-dispatch
+	// goroutines are awaited first so no agent-owned goroutine outlives the
+	// run (this is what makes context cancellation leak-free).
 	defer func() {
+		a.preDispatchWG.Wait()
 		a.running = false
 		// Also clear the abort flag so subsequent runs start fresh.
 		a.abort.Store(false)
 	}()
+
+	// A context that is already canceled ends the run before anything is
+	// recorded: no user message, no task, no LLM request.
+	if cerr := canceledError(ctx); cerr != nil {
+		return &RunResult{Err: cerr}, cerr
+	}
+
+	// Per-run accounting: FinalText / usage / turns are scoped to this run,
+	// even though the agent and its conversation are reused across runs.
+	run := newRunStats(a.conversation)
 
 	// Each new user turn must reopen the conversation loop.
 	a.conversation.MarkIncomplete()
@@ -268,10 +321,16 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 
 	// Main conversation loop
 	for !a.abort.Load() {
+		if res, err, canceled := a.canceledRunResult(ctx, run, callback); canceled {
+			return res, err
+		}
+
 		// Get available tools for current mode
 		availableTools := a.toolRegistry.GetForMode(string(a.mode))
 
-		// Build system prompt with tool descriptions from registry (includes MCP tools)
+		// Build system prompt with tool descriptions from registry (includes
+		// host-registered native tools). The AVAILABLE TOOLS section is always
+		// rendered from the registry, even in SystemPromptOverride mode.
 		toolDescs := make([]prompts.ToolDescription, 0, len(availableTools))
 		for _, tool := range availableTools {
 			toolDescs = append(toolDescs, prompts.ToolDescription{
@@ -283,7 +342,7 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 		if a.mode == ModePlan {
 			toolDescs = filterPlanModeTools(toolDescs)
 		}
-		systemPrompt := prompts.GetSystemPrompt(string(a.mode), toolDescs, a.customRules, a.agentName)
+		systemPrompt := a.systemPromptFor(toolDescs)
 
 		// Trim conversation if it exceeds token budget before sending.
 		if a.conversation.IsTokenAboveThreshold(100) {
@@ -344,10 +403,16 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 		// Use streaming API
 		streamChan, err := a.createStreamWithRetry(ctx, req, callback)
 		if err != nil {
+			// A canceled context is not a provider failure: it ends the run
+			// immediately instead of burning the correction budget.
+			if res, cerr, canceled := a.canceledRunResult(ctx, run, callback); canceled {
+				return res, cerr
+			}
 			a.consecutiveMistakes++
 			callback.OnError(err)
 			if a.consecutiveMistakes >= a.maxConsecutiveMistakes {
-				return fmt.Errorf("max consecutive mistakes reached: %w", err)
+				runErr := fmt.Errorf("max consecutive mistakes reached: %w", err)
+				return a.buildRunResult(run, runErr), runErr
 			}
 			continue
 		}
@@ -360,15 +425,17 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 		callback.OnStreamStart()
 
 		// Process the stream
-		if err := a.processStream(ctx, streamChan, callback); err != nil {
-			if a.store != nil && a.taskID != "" {
-				if dbErr := a.store.FailTask(a.taskID, err.Error()); dbErr != nil {
-					logWarnf("Failed to mark task as failed: %v", dbErr)
-				}
+		if err := a.processStream(ctx, streamChan, callback, run); err != nil {
+			// Cancellation wins over a mid-stream error, so an interrupted run
+			// always surfaces the wrapped context error to the caller.
+			if res, cerr, canceled := a.canceledRunResult(ctx, run, callback); canceled {
+				return res, cerr
 			}
+			a.failTask(err.Error())
 			callback.OnError(err)
-			return err
+			return a.buildRunResult(run, err), err
 		}
+		run.turns++
 
 		// Save assistant message to storage, attaching the list of tools that
 		// were available to the assistant so users can diagnose why tool_calls
@@ -395,6 +462,12 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 			}
 		}
 
+		// Tool execution runs with the run's context: a canceled context ends
+		// the run here instead of feeding more work to the model.
+		if res, cerr, canceled := a.canceledRunResult(ctx, run, callback); canceled {
+			return res, cerr
+		}
+
 		// If the conversation is not complete but the last assistant message has
 		// no tool calls while tools are still needed, inject the no-tools-used
 		// reminder so the next loop iteration forces the model to call a tool.
@@ -405,7 +478,8 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 				if lastMsg.Role == types.RoleAssistant && len(lastMsg.ToolCalls) == 0 && needsTool {
 					a.consecutiveMistakes++
 					if a.consecutiveMistakes >= a.maxConsecutiveMistakes {
-						return fmt.Errorf("max consecutive mistakes reached: model did not use a tool in %d consecutive turns", a.consecutiveMistakes)
+						runErr := fmt.Errorf("max consecutive mistakes reached: model did not use a tool in %d consecutive turns", a.consecutiveMistakes)
+						return a.buildRunResult(run, runErr), runErr
 					}
 					a.conversation.AddMessage(types.Message{
 						Role:    types.RoleUser,
@@ -438,7 +512,21 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 	}
 
 	callback.OnComplete()
-	return nil
+	return a.buildRunResult(run, nil), nil
+}
+
+// systemPromptFor builds the system prompt for the current mode and tool set.
+//
+// Default path: prompts.GetSystemPrompt (role, section catalogue, tool
+// catalogue, custom rules). With Options.SystemPromptOverride set, the host
+// text replaces the default prompt entirely and the loop appends only the
+// AVAILABLE TOOLS section (prompts.ApplySystemPromptOverride) — without it
+// the model could not see the tools it is expected to call.
+func (a *BaseAgent) systemPromptFor(toolDescs []prompts.ToolDescription) string {
+	if a.systemPromptOverride != "" {
+		return prompts.ApplySystemPromptOverride(a.systemPromptOverride, toolDescs)
+	}
+	return prompts.GetSystemPrompt(string(a.mode), toolDescs, a.customRules, a.agentName)
 }
 
 // ResetTask clears the current task ID so the next RunWithCallback creates a new task.
@@ -507,7 +595,12 @@ func (a *BaseAgent) GetMode() Mode {
 	return a.mode
 }
 
-// Abort stops the current execution
+// Abort stops the current execution at the next checkpoint: the run ends
+// after the in-flight stream has been consumed and any in-flight tool has
+// finished, and RunWithCallback reports a nil error (an orderly stop, not a
+// failure). Abort does not force-unblock an in-flight provider read — to
+// interrupt a hung stream or a hung tool immediately, cancel the run's
+// context, which takes precedence over a pending abort flag.
 func (a *BaseAgent) Abort() {
 	a.abort.Store(true)
 }

@@ -2,18 +2,54 @@
 
 ## 当前工作焦点
 
-**M3 原生 Anthropic Messages 适配器完成**：provider/anthropic.go（传输+SSE
-流式）+ provider/anthropic_wire.go（wire 类型与双向映射），registry 注册
-"anthropic"，29 个 httptest 逐事件断言测试 `-race` 绿，覆盖率 95-100%。
+**嵌入式宿主适配面完成（2026-08-29，Maestro 集成前置）**：
+- `loop/result.go` + `Run`/`RunWithCallback` 返回 `(*RunResult, error)`：
+  FinalText = attempt_completion `result`（或 plan_mode_respond `response`，
+  新到终结工具优先）、无终结工具时 best-effort 取本次 run 最后一条
+  assistant 文本；InputTokens/OutputTokens 为本次 run 各回合之和；
+  Turns/Duration/Err 同为 run 归口。已以「返回值」形态定稿并记入决策表
+  （否决 `RunResult()` 查询方法方案）。
+- ctx 取消语义钉死：中断流读取（弃流先 drain）与工具执行（含预派发
+  goroutine），返回包装 `context.Canceled`，`errors.Is` 成立；取消不消耗
+  mistake 配额；`preDispatchWG.Wait()` 保证无 agent 自有 goroutine 跨 run
+  存活；`Abort()` 保持协作式检查点语义不变（godoc 已钉死两者分工）。
+- headless ask_followup：回调错误文本作为工具结果回传，run 继续由模型自治。
+- `SystemPromptOverride`（Options/Config 双入口）：完全替换默认系统提示词，
+  AVAILABLE TOOLS 段仍由 loop 渲染；`prompts.ApplySystemPromptOverride`
+  导出实现；守卫测试 override 模式跳过静态目录断言。
+- 新测试：loop/result_test.go、loop/cancel_test.go、loop/headless_test.go、
+  prompts/system_test.go 补充、loop/prompt_guard_test.go override 守卫、
+  根包 facade 测试；`go test -race -count=2 ./...` 6 包全绿，依赖 0。
 下一步 **M4：compaction（Trim 移植 + Summarize 新写）与工具行为定稿**。
 
 **已知残留（有意保留，超出本次点名范围且删除会改行为）**：
-loop/stream.go:173 预派发副作用白名单 case 里列有 "kb_ingest"/"browser_copy"
+loop/stream.go 预派发副作用白名单 case 里列有 "kb_ingest"/"browser_copy"
 （剔除工具名）。该白名单是安全网——删除会使同名自定义工具变为可预派发
 （竞态风险），故保留。
 
 
 ## 近期变更
+
+- 2026-08-29：**嵌入式宿主适配面完成**（详见决策表 2026-08-29 各行）：
+  - loop/result.go（新）：RunResult 结构 + runStats 按 run 归口累计 +
+    canceledError（"agent run canceled: %w"）/ canceledRunResult（4 个
+    检查点：循环顶、建流失败、processStream 出错、工具执行后）/ 
+    terminalToolText（终结工具参数提取）+ failTask / extractFinalText。
+  - loop/agent.go：Run/RunWithCallback 签名改 (*RunResult, error)；Options
+    增 SystemPromptOverride；BaseAgent 增 systemPromptOverride 字段与
+    preDispatchWG；systemPromptFor 单一提示词构造路径；Abort godoc 钉死
+    "协作式检查点，不打断流读取，打断靠 ctx"。
+  - loop/stream.go：processStream 增 run 归口累计与 ctx.Done 分支（go
+    drainStream）；预派发 goroutine 纳入 preDispatchWG；preDispatchToolCall
+    入口加 abort/ctx 守卫。loop/toolexec.go：executeToolCalls 循环顶加
+    abort/ctx 检查。
+  - prompts/system.go：导出 ApplySystemPromptOverride（override 原文 +
+    buildToolSection；空 override 返回 "" 回退默认）。
+  - provider/scripted.go：TurnScript 增 InputTokens/OutputTokens（Done
+    chunk 携带 TokenUsage），供 run 级用量断言。
+  - 根包：cobot.go Config.SystemPromptOverride + 包注释示例更新；
+    aliases.go 增 RunResult 别名；README 快速上手改为 RunResult 形态并
+    说明覆盖/取消/headless 语义。
 
 - 2026-08-28：**M3 Anthropic 适配器完成**：
   - provider/anthropic.go（~680 行）：NewAnthropicProvider（key 空则读

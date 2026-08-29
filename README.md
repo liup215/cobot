@@ -2,7 +2,7 @@
 
 > 纯 Go、零第三方依赖的 Agent SDK —— 从 gline（Cline 血统）提取重构，供 Maestro 等项目进程内驱动 LLM agent。
 
-**状态**：M0–M2 + 根包门面已完成（`go test -race ./...` 全绿）；M3（Anthropic 适配器）进行中。规格唯一来源：[memory-bank/requirements.md](memory-bank/requirements.md)。
+**状态**：M0–M2 + 根包门面 + 嵌入式宿主适配面（结构化 `RunResult`、ctx 取消语义、headless ask_followup 行为、`SystemPromptOverride`）已完成（`go test -race ./...` 全绿）；M3（Anthropic 适配器）进行中。规格唯一来源：[memory-bank/requirements.md](memory-bank/requirements.md)。
 
 ## 快速上手
 
@@ -14,10 +14,15 @@ agent, err := cobot.NewAgent(cobot.Config{
 	Model:       "gpt-4o",
 	AutoApprove: true,
 })
-err = agent.Run(ctx, "fix the login bug")
+res, err := agent.Run(ctx, "fix the login bug")
+// res.FinalText      attempt_completion 的 result 参数（无终结工具时为最后一条 assistant 文本）
+// res.InputTokens / res.OutputTokens  本次 run 各回合用量之和
+// res.Turns / res.Duration / res.Err 完成回合数、耗时与终结错误（nil = 正常结束）
 ```
 
-单一 `Config` 入口（根包门面），可选 `AgentName` 自定义系统提示词中的 agent 身份（默认 `"cobot"`）。
+单一 `Config` 入口（根包门面）：可选 `AgentName` 自定义系统提示词中的 agent 身份（默认 `"cobot"`）；`SystemPromptOverride` 非空时**完全替换**默认系统提示词（宿主自带完整角色提示词，如 Maestro 的中文角色提示词），`AVAILABLE TOOLS` 工具说明段落仍由 loop 依据 Registry 渲染，`CustomRules`/`AgentName` 在覆盖模式下被忽略。
+
+`Run` / `RunWithCallback` 返回 `(*RunResult, error)`：`err == nil` 即本次 run 正常结束（含 `Abort()`）；`ctx` 取消会中断流式读取与工具执行并返回 `errors.Is(err, context.Canceled)` 为真的包装错误；宿主的 `ask_followup_question` 回调返回错误时，错误文本作为工具结果回传给模型、run 继续由模型自行决策。
 
 ## 设计要点（v0.1）
 

@@ -9,7 +9,8 @@
 //		Model:       "gpt-4o",
 //		AutoApprove: true,
 //	})
-//	err = agent.Run(ctx, "fix the login bug")
+//	res, err := agent.Run(ctx, "fix the login bug")
+//	// res.FinalText is the attempt_completion deliverable.
 //
 // Everything is optional and has a sensible default: the tool set defaults
 // to the built-in registry (read/write/replace/search/execute/list files
@@ -89,11 +90,22 @@ type Config struct {
 	MaxConsecutiveMistakes int
 
 	// CustomRules is extra text appended to the system prompt.
+	// Ignored while SystemPromptOverride is set.
 	CustomRules string
+
+	// SystemPromptOverride completely replaces the built-in system prompt
+	// when non-empty — for hosts that ship their own persona and tool
+	// conventions (e.g. Maestro's role prompts) and need replacement, not
+	// accumulation. The AVAILABLE TOOLS section (tool names, descriptions
+	// and input schemas, filtered by the current mode) is still rendered by
+	// the loop and appended, so the model can see the tools it may call.
+	// CustomRules and AgentName are ignored while an override is active.
+	SystemPromptOverride string
 
 	// AgentName is the agent identity announced in the system prompt's
 	// role section ("You are <AgentName>, a highly skilled software
-	// engineer..."). Empty = "cobot".
+	// engineer..."). Empty = "cobot". Ignored while SystemPromptOverride
+	// is set.
 	AgentName string
 
 	// MaxTokens overrides the conversation context budget (0 = 128k).
@@ -141,6 +153,7 @@ func NewAgent(cfg Config) (*Agent, error) {
 		AutoApprove:            cfg.AutoApprove,
 		MaxConsecutiveMistakes: cfg.MaxConsecutiveMistakes,
 		CustomRules:            cfg.CustomRules,
+		SystemPromptOverride:   cfg.SystemPromptOverride,
 		AgentName:              cfg.AgentName,
 		MaxTokens:              cfg.MaxTokens,
 		RetryDelays:            cfg.RetryDelays,

@@ -84,6 +84,31 @@ func GetSystemPrompt(mode string, tools []ToolDescription, customRules string, a
 	return prompt.String()
 }
 
+// ApplySystemPromptOverride builds the system prompt for a host that supplies
+// its own prompt (e.g. a complete persona + tool-convention prompt):
+//
+//   - override is used verbatim — the default role line, section catalogue
+//     (TOOL USE / EDITING FILES / ... / OBJECTIVE) and CustomRules are NOT
+//     prepended or appended;
+//   - the AVAILABLE TOOLS section rendered from the registry is appended, so
+//     the model still sees the names, descriptions and input schemas of the
+//     tools the loop will actually execute (without it an overriding host
+//     would have to restate every tool schema by hand).
+//
+// An empty override returns "" — callers fall back to GetSystemPrompt.
+func ApplySystemPromptOverride(override string, tools []ToolDescription) string {
+	if override == "" {
+		return ""
+	}
+	var prompt strings.Builder
+	prompt.WriteString(override)
+	if section := buildToolSection(tools); section != "" {
+		prompt.WriteString("\n\n")
+		prompt.WriteString(section)
+	}
+	return prompt.String()
+}
+
 // getToolUseSection returns the tool use section with formatting, guidelines, and examples.
 func getToolUseSection() string {
 	return `TOOL USE

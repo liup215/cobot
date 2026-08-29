@@ -10,78 +10,119 @@ import (
 	"github.com/liup215/cobot/types"
 )
 
-// processStream handles the streaming response from the LLM
-func (a *BaseAgent) processStream(ctx context.Context, streamChan <-chan StreamChunk, callback StreamCallback) error {
+// processStream handles the streaming response from the LLM. run receives the
+// per-run accounting (turn usage); it is owned by the calling goroutine.
+//
+// The read is cancellable: when ctx is done the remaining stream is abandoned
+// (drained in the background so the provider's pump goroutine can finish) and
+// the interrupted turn is not recorded — the caller reports the wrapped
+// context error.
+func (a *BaseAgent) processStream(ctx context.Context, streamChan <-chan StreamChunk, callback StreamCallback, run *runStats) error {
 	var content strings.Builder
 	var reasoning strings.Builder
 	var toolCalls []ToolCall
 
-	for chunk := range streamChan {
-		if chunk.Error != nil {
-			return chunk.Error
-		}
+	// Usage rides on the final chunk of a stream as the cumulative total for
+	// that turn. Only the last report is kept, so a provider that repeats a
+	// cumulative report cannot double-count; it is folded into the run once,
+	// after the stream ends.
+	var usageSeen bool
+	var usageIn, usageOut int
 
-		logDebugf("processStream chunk: content=%d reasoning=%d toolCall=%v done=%v",
-			len(chunk.Content), len(chunk.ReasoningContent), chunk.ToolCall != nil, chunk.Done)
+streamLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			// The run's context is canceled: stop reading. The rest of the
+			// stream is drained in the background so the provider's pump
+			// goroutine — which may block sending into an unbuffered channel
+			// — can finish and release the connection.
+			go drainStream(streamChan)
+			return ctx.Err()
+		case chunk, ok := <-streamChan:
+			if !ok {
+				// Provider closed the stream (some providers close without a
+				// Done chunk); treat it as the end of the turn.
+				break streamLoop
+			}
 
-		// Accumulate real token usage from the API whenever available
-		if chunk.Usage.TotalTokens > 0 {
-			a.conversation.AddActualTokens(chunk.Usage.InputTokens, chunk.Usage.OutputTokens)
-		}
+			if chunk.Error != nil {
+				return chunk.Error
+			}
 
-		if chunk.Done {
-			break
-		}
+			logDebugf("processStream chunk: content=%d reasoning=%d toolCall=%v done=%v",
+				len(chunk.Content), len(chunk.ReasoningContent), chunk.ToolCall != nil, chunk.Done)
 
-		// Handle content (actual assistant reply text)
-		if chunk.Content != "" {
-			content.WriteString(chunk.Content)
-			callback.OnContent(chunk.Content)
-		}
+			// Accumulate real token usage from the API whenever available
+			if chunk.Usage.TotalTokens > 0 {
+				a.conversation.AddActualTokens(chunk.Usage.InputTokens, chunk.Usage.OutputTokens)
+				usageSeen = true
+				usageIn, usageOut = chunk.Usage.InputTokens, chunk.Usage.OutputTokens
+			}
 
-		// Handle reasoning content (internal/model thinking).
-		// Cline keeps this strictly separate from assistant text and exposes
-		// it via a dedicated callback so the UI can choose to show it in a
-		// collapsible panel or hide it completely.  We never mix reasoning
-		// into OnContent.
-		if chunk.ReasoningContent != "" {
-			reasoning.WriteString(chunk.ReasoningContent)
-			callback.OnReasoning(chunk.ReasoningContent)
-		}
+			if chunk.Done {
+				break streamLoop
+			}
 
-		// Handle tool call
-		if chunk.ToolCall != nil {
-			if chunk.IsPartial {
-				// Partial tool calls from provider are already accumulated
-				// Provider sends copies, so we don't need to track state here
-				// Just ignore partials in processStream
-			} else {
-				// Complete tool call received
-				tc := *chunk.ToolCall
-				toolCalls = append(toolCalls, tc)
+			// Handle content (actual assistant reply text)
+			if chunk.Content != "" {
+				content.WriteString(chunk.Content)
+				callback.OnContent(chunk.Content)
+			}
 
-				// Notify UI that a tool call has been detected in the stream.
-				callback.OnToolCallStart(tc)
+			// Handle reasoning content (internal/model thinking).
+			// Cline keeps this strictly separate from assistant text and exposes
+			// it via a dedicated callback so the UI can choose to show it in a
+			// collapsible panel or hide it completely.  We never mix reasoning
+			// into OnContent.
+			if chunk.ReasoningContent != "" {
+				reasoning.WriteString(chunk.ReasoningContent)
+				callback.OnReasoning(chunk.ReasoningContent)
+			}
 
-				// Track in pending list (used by tests / diagnostics).
-				a.pendingToolCallsMu.Lock()
-				a.pendingToolCalls = append(a.pendingToolCalls, tc)
-				a.pendingToolCallsMu.Unlock()
+			// Handle tool call
+			if chunk.ToolCall != nil {
+				if chunk.IsPartial {
+					// Partial tool calls from provider are already accumulated
+					// Provider sends copies, so we don't need to track state here
+					// Just ignore partials in processStream
+				} else {
+					// Complete tool call received
+					tc := *chunk.ToolCall
+					toolCalls = append(toolCalls, tc)
 
-				// Mark this call ID as pre-dispatched so the main loop skips
-				// calling OnToolCallStart a second time.
-				a.preDispatchedIDsMu.Lock()
-				if a.preDispatchedIDs == nil {
-					a.preDispatchedIDs = make(map[string]bool)
+					// Notify UI that a tool call has been detected in the stream.
+					callback.OnToolCallStart(tc)
+
+					// Track in pending list (used by tests / diagnostics).
+					a.pendingToolCallsMu.Lock()
+					a.pendingToolCalls = append(a.pendingToolCalls, tc)
+					a.pendingToolCallsMu.Unlock()
+
+					// Mark this call ID as pre-dispatched so the main loop skips
+					// calling OnToolCallStart a second time.
+					a.preDispatchedIDsMu.Lock()
+					if a.preDispatchedIDs == nil {
+						a.preDispatchedIDs = make(map[string]bool)
+					}
+					a.preDispatchedIDs[tc.ID] = true
+					a.preDispatchedIDsMu.Unlock()
+
+					// Pre-dispatch: launch tool execution in the background so it
+					// can overlap with the remaining SSE stream. The wait group
+					// lets RunWithCallback await the goroutine on exit.
+					a.preDispatchWG.Add(1)
+					go func() {
+						defer a.preDispatchWG.Done()
+						a.preDispatchToolCall(ctx, tc)
+					}()
 				}
-				a.preDispatchedIDs[tc.ID] = true
-				a.preDispatchedIDsMu.Unlock()
-
-				// Pre-dispatch: launch tool execution in the background so it
-				// can overlap with the remaining SSE stream.
-				go a.preDispatchToolCall(ctx, tc)
 			}
 		}
+	}
+
+	if usageSeen {
+		run.addUsage(usageIn, usageOut)
 	}
 
 	// Build the final content strings after the stream is complete.
@@ -129,10 +170,20 @@ func (a *BaseAgent) processStream(ctx context.Context, streamChan <-chan StreamC
 	return nil
 }
 
+// drainStream consumes the remaining chunks of an abandoned stream until the
+// provider closes it. Providers deliver into a channel and may block sending,
+// so draining lets their pump goroutine finish and release the connection
+// after a canceled run stopped reading.
+func drainStream(streamChan <-chan StreamChunk) {
+	for range streamChan {
+	}
+}
+
 // preDispatchToolCall executes a tool in the background while the SSE stream
 // is still ongoing and stores the result so the main loop can reuse it.
 func (a *BaseAgent) preDispatchToolCall(ctx context.Context, tc ToolCall) {
-	if a.abort.Load() {
+	if a.abort.Load() || ctx.Err() != nil {
+		// Aborted or canceled: do not start side work for a run that is over.
 		return
 	}
 

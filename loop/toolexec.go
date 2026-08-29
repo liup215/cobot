@@ -17,7 +17,9 @@ func (a *BaseAgent) executeToolCalls(ctx context.Context, lastMsg types.Message,
 	// was still active) are used when available; otherwise tools run
 	// synchronously here.
 	for _, tc := range lastMsg.ToolCalls {
-		if a.abort.Load() {
+		if a.abort.Load() || ctx.Err() != nil {
+			// Aborted or canceled: stop executing tools. The run's context is
+			// honored even for tools that ignore it (they receive it too).
 			break
 		}
 

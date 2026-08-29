@@ -216,7 +216,7 @@ func TestAttemptCompletionTerminatesRun(t *testing.T) {
 		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c2", "done")}},
 	)
 	cb := &recordingCallback{}
-	if err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	snap := cb.snapshot()
@@ -283,7 +283,7 @@ func TestAskFollowupDoesNotTerminate(t *testing.T) {
 		t.Fatal(err)
 	}
 	cb := &recordingCallback{}
-	if err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if !agent.GetConversation().IsComplete() {
@@ -305,7 +305,7 @@ func TestNoToolsUsedInjectsCorrection(t *testing.T) {
 		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c2", "done")}},
 	)
 	cb := &recordingCallback{}
-	if err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	var found bool
@@ -328,7 +328,7 @@ func TestMaxConsecutiveMistakesStopsRun(t *testing.T) {
 		provider.TurnScript{Content: "no tools 3"},
 	)
 	cb := &recordingCallback{}
-	err := agent.RunWithCallback(context.Background(), "task", cb)
+	_, err := agent.RunWithCallback(context.Background(), "task", cb)
 	if err == nil || !strings.Contains(err.Error(), "max consecutive mistakes") {
 		t.Fatalf("want max-mistakes error, got %v", err)
 	}
@@ -348,7 +348,7 @@ func TestPreDispatchExecutesOnce(t *testing.T) {
 		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c2", "done")}},
 	)
 	cb := &recordingCallback{}
-	if err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if echo.count() != 1 {
@@ -402,7 +402,7 @@ func TestGuardDenyFeedsReasonBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	cb := &recordingCallback{}
-	if err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if echo.count() != 0 {
@@ -448,7 +448,7 @@ func TestGuardErrAbortRunAbortsRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	cb := &recordingCallback{}
-	if err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if echo.count() != 0 {
@@ -488,7 +488,7 @@ func TestGuardUnexpectedErrorFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	cb := &recordingCallback{}
-	if err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if echo.count() != 0 {
@@ -526,7 +526,7 @@ func TestPlanModeBlocksActOnlyTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	cb := &recordingCallback{}
-	if err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	var rejected string
@@ -550,7 +550,7 @@ func TestXMLFallbackParsesToolCalls(t *testing.T) {
 		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c2", "done")}},
 	)
 	cb := &recordingCallback{}
-	if err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if echo.count() != 1 {
@@ -567,7 +567,7 @@ func TestStreamErrorStopsRun(t *testing.T) {
 		provider.TurnScript{Err: errors.New("boom")},
 	)
 	cb := &recordingCallback{}
-	err := agent.RunWithCallback(context.Background(), "task", cb)
+	_, err := agent.RunWithCallback(context.Background(), "task", cb)
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("want stream error, got %v", err)
 	}
@@ -592,8 +592,20 @@ func TestAbortStopsRun(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 		agent.Abort()
 	}()
-	if err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+	// Abort() stays the non-error cancellation channel: the run ends without
+	// an error and still reports a structured result.
+	res, err := agent.RunWithCallback(context.Background(), "task", cb)
+	if err != nil {
 		t.Fatalf("run: %v", err)
+	}
+	if res == nil {
+		t.Fatal("RunWithCallback returned a nil result on the abort path")
+	}
+	if res.Err != nil {
+		t.Errorf("result.Err = %v, want nil (abort is not an error)", res.Err)
+	}
+	if res.Duration <= 0 {
+		t.Errorf("result.Duration = %v, want > 0", res.Duration)
 	}
 	if agent.IsRunning() {
 		t.Error("agent still running after abort")
@@ -650,7 +662,7 @@ func newFlakyAgent(t *testing.T, failures int, status int, delays []time.Duratio
 func TestRetryRecoversFromConnectionErrors(t *testing.T) {
 	agent, _, flaky := newFlakyAgent(t, 2, 503, []time.Duration{0, 0})
 	cb := &recordingCallback{}
-	if err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if flaky.calls != 3 { // 2 failures + 1 success
@@ -674,7 +686,7 @@ func TestRetryRecoversFromConnectionErrors(t *testing.T) {
 func TestNoRetryOn4xx(t *testing.T) {
 	agent, _, flaky := newFlakyAgent(t, 99, 400, []time.Duration{0})
 	cb := &recordingCallback{}
-	err := agent.RunWithCallback(context.Background(), "task", cb)
+	_, err := agent.RunWithCallback(context.Background(), "task", cb)
 	if err == nil {
 		t.Fatal("want error for 400, got nil")
 	}
@@ -693,7 +705,7 @@ func TestNoRetryOn4xx(t *testing.T) {
 func TestRetryDisabledWithEmptyDelays(t *testing.T) {
 	agent, _, flaky := newFlakyAgent(t, 3, 503, []time.Duration{})
 	cb := &recordingCallback{}
-	if err := agent.RunWithCallback(context.Background(), "task", cb); err == nil {
+	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err == nil {
 		t.Fatal("want error when retries are disabled")
 	}
 	// No retries: each of the 3 main-loop rounds creates one stream, then
@@ -717,7 +729,7 @@ func TestCompactionEventsFire(t *testing.T) {
 	agent.conversation.MaxTokens = 200
 	agent.conversation.ResponseBuffer = 0
 	cb := &recordingCallback{}
-	if err := agent.RunWithCallback(context.Background(), "a very long task prompt that exceeds the tiny token budget for sure", cb); err != nil {
+	if _, err := agent.RunWithCallback(context.Background(), "a very long task prompt that exceeds the tiny token budget for sure", cb); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	snap := cb.snapshot()
@@ -771,7 +783,7 @@ func TestAgentNameInSystemPrompt(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			agent, prov := agentNameAgent(t, tc.agentName)
-			if err := agent.Run(context.Background(), "task"); err != nil {
+			if _, err := agent.Run(context.Background(), "task"); err != nil {
 				t.Fatalf("run: %v", err)
 			}
 			reqs := prov.Requests()

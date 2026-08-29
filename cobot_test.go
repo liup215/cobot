@@ -59,8 +59,18 @@ func TestNewAgentEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
 	}
-	if err := agent.RunWithCallback(context.Background(), "do the thing", cb); err != nil {
+	res, err := agent.RunWithCallback(context.Background(), "do the thing", cb)
+	if err != nil {
 		t.Fatalf("RunWithCallback: %v", err)
+	}
+	if res == nil {
+		t.Fatal("RunWithCallback returned a nil result")
+	}
+	if res.FinalText != "all done" {
+		t.Errorf("RunResult.FinalText = %q, want the attempt_completion result", res.FinalText)
+	}
+	if res.Turns != 2 {
+		t.Errorf("RunResult.Turns = %d, want 2", res.Turns)
 	}
 	if got := strings.Join(cb.contents, ""); got != "thinking..." {
 		t.Errorf("content = %q", got)
@@ -151,7 +161,7 @@ func TestAgentNameInSystemPrompt(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewAgent: %v", err)
 			}
-			if err := agent.Run(context.Background(), "hello"); err != nil {
+			if _, err := agent.Run(context.Background(), "hello"); err != nil {
 				t.Fatalf("Run: %v", err)
 			}
 			reqs := scripted.Requests()
@@ -167,6 +177,38 @@ func TestAgentNameInSystemPrompt(t *testing.T) {
 				t.Errorf("system prompt = %q, want identity prefix %q", head, tc.want)
 			}
 		})
+	}
+}
+
+// Config.SystemPromptOverride reaches the loop and replaces the default
+// system prompt, while the loop still renders the AVAILABLE TOOLS section so
+// the model can see the registered tools.
+func TestNewAgentSystemPromptOverride(t *testing.T) {
+	override := "你是嵌入式宿主注入的完整中文角色提示词。"
+	scripted := provider.NewScriptedProvider(completionScript("done"))
+	agent, err := cobot.NewAgent(cobot.Config{
+		Provider:             scripted,
+		SystemPromptOverride: override,
+	})
+	if err != nil {
+		t.Fatalf("NewAgent: %v", err)
+	}
+	if _, err := agent.Run(context.Background(), "hello"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	reqs := scripted.Requests()
+	if len(reqs) == 0 {
+		t.Fatal("provider captured no request")
+	}
+	sp := reqs[0].SystemPrompt
+	if !strings.HasPrefix(sp, override) {
+		t.Errorf("system prompt = %.60q, want it to start with the host override", sp)
+	}
+	if !strings.Contains(sp, "AVAILABLE TOOLS:") {
+		t.Error("override prompt lacks the loop-rendered AVAILABLE TOOLS section")
+	}
+	if strings.Contains(sp, "CAPABILITIES") {
+		t.Error("default prompt section leaked into the override prompt")
 	}
 }
 
