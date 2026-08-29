@@ -16,9 +16,8 @@ const DefaultAgentName = "cobot"
 // GetSystemPrompt returns the appropriate system prompt for the given mode.
 // agentName is the agent identity announced in the role section; empty
 // falls back to DefaultAgentName. If customRules is non-empty, it is
-// section is added telling the LLM about available skills and the
-// use_skill tool.
-func GetSystemPrompt(mode string, tools []ToolDescription, customRules string, skills []types.SkillMeta, agentName string) string {
+// appended after the tool section.
+func GetSystemPrompt(mode string, tools []ToolDescription, customRules string, agentName string) string {
 	if agentName == "" {
 		agentName = DefaultAgentName
 	}
