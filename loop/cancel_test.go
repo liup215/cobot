@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"runtime"
+	"sort"
 	"testing"
 	"time"
 
 	"github.com/liup215/cobot/provider"
 	"github.com/liup215/cobot/tools"
+	"github.com/liup215/cobot/types"
 )
 
 // ─── ctx cancellation semantics ──────────────────────────────────────────────
@@ -277,5 +280,168 @@ func TestAbortDoesNotUnblockStreamReadButContextDoes(t *testing.T) {
 	}
 	if agent.IsRunning() {
 		t.Error("agent still marked running after the canceled run")
+	}
+}
+
+// ─── a run must never leave unanswered tool calls behind ─────────────────────
+
+// unansweredToolCallIDs lists the tool_call IDs of assistant messages that no
+// tool-result message answers. OpenAI-compatible endpoints reject a request
+// whose assistant message with tool_calls is not followed by one tool message
+// per tool_call_id (HTTP 400), so an agent that leaves any behind breaks the
+// next run on the same conversation.
+func unansweredToolCallIDs(msgs []types.Message) []string {
+	asked := map[string]bool{}
+	for _, m := range msgs {
+		if m.Role == types.RoleAssistant {
+			for _, tc := range m.ToolCalls {
+				asked[tc.ID] = true
+			}
+		}
+	}
+	answered := map[string]bool{}
+	for _, m := range msgs {
+		if m.Role == types.RoleTool {
+			answered[m.ToolCallID] = true
+		}
+	}
+	var missing []string
+	for id := range asked {
+		if !answered[id] {
+			missing = append(missing, id)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+// Canceling in the middle of a same-turn batch of tool calls must still leave
+// a well-formed transcript: every tool_call of the assistant message is
+// answered by exactly one tool result, and the next run on the same agent can
+// send the conversation. Regression: the batch used to stop at the cancel
+// checkpoint, leaving the calls after the interrupted one unanswered — the
+// next request was then rejected by OpenAI-compatible endpoints with HTTP 400
+// ("An assistant message with 'tool_calls' must be followed by tool messages").
+func TestContextCancelMidBatchLeavesWellFormedConversation(t *testing.T) {
+	prov := provider.NewScriptedProvider(
+		provider.TurnScript{ToolCalls: []provider.ToolCall{
+			{ID: "c1", Name: "execute_command", Input: `{"command":"sleep 100"}`},
+			echoCall("c2"),
+		}},
+	)
+	reg := tools.NewRegistry()
+	tool := &blockedTool{started: make(chan struct{})} // execute_command: main-loop path, never pre-dispatched
+	if err := reg.Register(&tools.ToolInfo{Tool: tool, AllowedModes: []string{"act"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(&tools.ToolInfo{Tool: tools.NewAttemptCompletionTool(), AllowedModes: []string{"act"}}); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := New(Options{Provider: prov, ToolRegistry: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := agent.RunWithCallback(ctx, "task", &recordingCallback{})
+		done <- err
+	}()
+	<-tool.started // cancel while the first call of the batch is executing
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want a wrapped context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("RunWithCallback did not return after cancellation mid-batch")
+	}
+
+	if missing := unansweredToolCallIDs(agent.GetConversation().GetMessages()); len(missing) > 0 {
+		t.Errorf("tool calls left without a tool result after cancellation: %v", missing)
+	}
+
+	// The transcript stays usable: the next run on the same agent sends a
+	// request whose every tool_call is answered.
+	prov2 := provider.NewScriptedProvider(
+		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c9", "recovered")}},
+	)
+	agent.provider = prov2
+	if _, err := agent.Run(context.Background(), "continue"); err != nil {
+		t.Fatalf("run after cancel: %v", err)
+	}
+	reqs := prov2.Requests()
+	if len(reqs) == 0 {
+		t.Fatal("no request captured after the canceled run")
+	}
+	if missing := unansweredToolCallIDs(reqs[0].Messages); len(missing) > 0 {
+		t.Errorf("next request carries unanswered tool calls %v (a 400 from OpenAI-compatible endpoints)", missing)
+	}
+}
+
+// denyAbortTool is a plain read-only tool whose calls the test guard answers
+// with ErrAbortRun.
+type denyAbortTool struct{}
+
+func (t *denyAbortTool) Name() string        { return "deny_abort_tool" }
+func (t *denyAbortTool) Description() string { return "tool the guard aborts the run for" }
+func (t *denyAbortTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{"x":{"type":"string"}}}`)
+}
+func (t *denyAbortTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
+	return "should never run", nil
+}
+
+// A guard-requested abort in the middle of a same-turn batch behaves the same
+// way: the run ends, but every tool call of the assistant message — including
+// the one the guard aborted and the ones after it — keeps a tool result.
+func TestGuardAbortLeavesWellFormedConversation(t *testing.T) {
+	prov := provider.NewScriptedProvider(
+		provider.TurnScript{ToolCalls: []provider.ToolCall{
+			echoCall("c1"),
+			{ID: "c2", Name: "deny_abort_tool", Input: `{"x":"2"}`},
+			echoCall("c3"),
+		}},
+	)
+	reg := tools.NewRegistry()
+	if err := reg.Register(&tools.ToolInfo{Tool: &echoTool{}, AllowedModes: []string{"act"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(&tools.ToolInfo{Tool: &denyAbortTool{}, AllowedModes: []string{"act"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(&tools.ToolInfo{Tool: tools.NewAttemptCompletionTool(), AllowedModes: []string{"act"}}); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := New(Options{
+		Provider:     prov,
+		ToolRegistry: reg,
+		Guard: func(ctx context.Context, call GuardedCall) (bool, string, error) {
+			if call.Name == "deny_abort_tool" {
+				return false, "", fmt.Errorf("policy: %w", ErrAbortRun)
+			}
+			return true, "", nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := agent.RunWithCallback(context.Background(), "task", &recordingCallback{})
+	if err != nil {
+		t.Fatalf("run: %v (a guard-requested abort is not an error)", err)
+	}
+	if res == nil || res.Err != nil {
+		t.Fatalf("result = %+v, want a clean result", res)
+	}
+	if missing := unansweredToolCallIDs(agent.GetConversation().GetMessages()); len(missing) > 0 {
+		t.Errorf("tool calls left without a tool result after a guard abort: %v", missing)
+	}
+	if agent.IsRunning() {
+		t.Error("agent still marked running after the guard abort")
 	}
 }

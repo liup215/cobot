@@ -108,6 +108,13 @@ duration 按 run 归口累计）、ctx 取消语义钉死（中断流读取与�
 跳过静态目录断言）。新增 22 个行为测试，`go test -race -count=2 ./...`
 6 包全绿，依赖仍为 0。
 下一步 M4：compaction（Trim 移植 + Summarize 新写）与工具行为定稿。
+**审查修复完成（2026-08-29 第 2 次执行）**：①flaky Duration 断言删除
+（Windows 时钟粒度，改确定性回拨单测）；②mid-run compaction 空
+FinalText/跨 run 泄漏改为 **turn 记录时捕获**（runStats.finalText/
+lastAssistantText，删除 extractFinalText 与 startMsgCount 索引法）；
+③同回合多 tool_call 取消/守卫中止时为未执行的调用落占位工具结果
+（recordSkippedToolResults），转录本跨 run 保持良构。红→绿均以仓库外
+探针验证；`-count=10 ./loop/` 绿、`-race -count=2 ./...` 6 包绿、依赖 0。
 
 ## Known Issues / 风险
 
@@ -147,3 +154,6 @@ duration 按 run 归口累计）、ctx 取消语义钉死（中断流读取与�
 | 2026-08-29 | headless ask_followup：回调返回错误 → 错误文本作为该 tool_call 的工具结果回传，run 继续由模型自行决策（转 attempt_completion 或按假设继续） | Maestro 无人类可答；整 run 作废/panic/死锁都不可接受，模型自治最稳；每次错误都逐次回传（TestAskFollowupErrorRoundTripsEachTime） |
 | 2026-08-29 | `SystemPromptOverride` 非空时**完全替换**默认系统提示词（CustomRules/AgentName 被忽略），但 AVAILABLE TOOLS 段仍由 loop 依 Registry 渲染 | Maestro 自带完整中文角色提示词，需要替换而非累加；不渲染工具段模型就看不到任何工具 schema，只能由宿主手工重述每个 schema |
 | 2026-08-29 | 提示词↔Registry 守卫在 override 模式跳过静态目录断言，只校验"工具段存在 + ⊆ 当前模式 Registry + 无默认段落泄漏"；守卫构造 prompt 改走 `BaseAgent.systemPromptFor` 单一代码路径 | 宿主文本可合法提及宿主侧原生工具（submit_plan/update_step/report_progress 等），静态断言会误伤；单一代码路径防守卫与实现漂移 |
+| 2026-08-29 | **FinalText 改为 turn 记录时捕获**（runStats.finalText/lastAssistantText，stream.go append assistant 消息时 recordAssistantTurn），删除「按 run 起始消息数索引转录本」的 extractFinalText | mid-run compaction 重写转录本后 run 起始消息数失效（本 run 消息落到索引之前），索引法报空 FinalText 甚至取到上一 run 的交付物；捕获式对 compaction 天然免疫，且"重试后的终结调用覆盖前者"语义更清晰 |
+| 2026-08-29 | 测试禁止对 `RunResult.Duration > 0` 做行为断言（Windows 时钟粒度 ~0.5-15ms，子毫秒 run 报 0）；需要验证时长时回拨 `run.startTime` | `-count=10 ./loop/` 实测 3/10 概率挂；非确定性断言违反"新增行为测试 -race 绿"验收 |
+| 2026-08-29 | 取消/守卫中止时对同回合未执行的 tool_call 逐个落占位工具结果（[NOT EXECUTED] 文案）再退出，保证转录本跨 run 良构 | OpenAI 兼容端点要求 assistant tool_calls 后每条 tool_call_id 都有 tool 消息，否则下一次请求 400；占位结果同时让回调收到完整 OnToolCallComplete 序列 |

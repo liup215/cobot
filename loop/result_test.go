@@ -2,15 +2,24 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/liup215/cobot/provider"
 	"github.com/liup215/cobot/tools"
 	"github.com/liup215/cobot/types"
 )
+
+// completionCallType is completionCall for the loop's internal message shape
+// (what processStream hands to runStats.recordAssistantTurn).
+func completionCallType(id, result string) types.ToolCall {
+	input, _ := json.Marshal(map[string]string{"result": result})
+	return types.ToolCall{ID: id, Name: types.ToolAttemptCompletion.String(), Input: input}
+}
 
 // ─── RunResult (structured run outcome) ──────────────────────────────────────
 
@@ -50,9 +59,10 @@ func TestRunResultFromAttemptCompletion(t *testing.T) {
 	if res.InputTokens != 300 || res.OutputTokens != 30 {
 		t.Errorf("usage = %d/%d, want 300/30", res.InputTokens, res.OutputTokens)
 	}
-	if res.Duration <= 0 {
-		t.Errorf("Duration = %v, want > 0", res.Duration)
-	}
+	// Duration is covered by TestRunResultDurationMeasuredFromRunStart: a
+	// scripted run finishes inside the platform clock granularity, so a
+	// behavioral "> 0" assertion here is flaky (Windows timer granularity
+	// makes a sub-millisecond run report exactly 0).
 	// The conversation-level actual tokens keep last-turn semantics; the run
 	// result is the one that aggregates.
 	in, out := agent.GetConversation().GetActualTokens()
@@ -213,6 +223,199 @@ func TestRunResultAlreadyCanceledContext(t *testing.T) {
 	}
 	if agent.IsRunning() {
 		t.Error("agent still marked running")
+	}
+}
+
+// Duration is the wall-clock time of the run. Asserted directly against a
+// runStats whose start is backdated, because a scripted run finishes inside
+// the platform clock granularity: on Windows a sub-millisecond run reports
+// Duration == 0, so a behavioral "> 0" assertion would be flaky (~10-30% on
+// -count=10).
+func TestRunResultDurationMeasuredFromRunStart(t *testing.T) {
+	agent, _ := newTestAgent(t,
+		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c1", "done")}},
+	)
+
+	run := newRunStats()
+	run.startTime = time.Now().Add(-25 * time.Millisecond)
+	if res := agent.buildRunResult(run, nil); res.Duration < 25*time.Millisecond {
+		t.Errorf("Duration = %v, want >= 25ms (measured from the run start)", res.Duration)
+	}
+}
+
+// The deliverable is captured when the assistant turn is recorded, so
+// compaction that rewrites the transcript mid-run can neither blank the
+// result nor resurface an earlier run's text. Regression for a defect found
+// by an out-of-repo probe: with the previous index-into-transcript
+// implementation, a run whose conversation was trimmed before its first turn
+// reported an empty FinalText even though it ended with attempt_completion.
+func TestRunResultFinalTextCapturedAtTurnTime(t *testing.T) {
+	agent, _ := newTestAgent(t,
+		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c0", "stale")}},
+	)
+	// An earlier run's deliverable is still sitting in the conversation.
+	if _, err := agent.Run(context.Background(), "first"); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	run := newRunStats()
+	run.recordAssistantTurn("", []types.ToolCall{completionCallType("c1", "the real deliverable")})
+
+	// Worst-case compaction: this run's own messages are rewritten away.
+	agent.conversation.Clear()
+
+	if res := agent.buildRunResult(run, nil); res.FinalText != "the real deliverable" {
+		t.Errorf("FinalText = %q, want the deliverable captured when the turn was recorded", res.FinalText)
+	}
+}
+
+// A run that produced no terminal tool call must not inherit the deliverable
+// of a terminal tool call that is still lying around in the shared
+// conversation from an earlier run.
+func TestRunResultFinalTextDoesNotLeakPreviousRun(t *testing.T) {
+	agent, _ := newTestAgent(t,
+		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c0", "previous run deliverable")}},
+	)
+	if _, err := agent.Run(context.Background(), "first"); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	run := newRunStats()
+	run.recordAssistantTurn("this run's analysis", nil)
+
+	res := agent.buildRunResult(run, nil)
+	if res.FinalText != "this run's analysis" {
+		t.Errorf("FinalText = %q, want this run's own text (no cross-run leak)", res.FinalText)
+	}
+}
+
+// A retried ending reports the terminal call that actually ended the run: a
+// later attempt_completion overwrites the deliverable of an earlier,
+// abandoned one (e.g. one denied by the guard).
+func TestRunResultLaterTerminalCallWins(t *testing.T) {
+	run := newRunStats()
+	run.recordAssistantTurn("", []types.ToolCall{completionCallType("c1", "first attempt")})
+	run.recordAssistantTurn("", []types.ToolCall{completionCallType("c2", "second attempt")})
+	if got := run.finalDeliverable(); got != "second attempt" {
+		t.Errorf("FinalText = %q, want the latest terminal call %q", got, "second attempt")
+	}
+}
+
+// ─── RunResult under mid-run compaction ──────────────────────────────────────
+
+// countOneTokenPerRune swaps in a deterministic estimator (1 token per rune)
+// and restores the package default on cleanup, so the token-budget thresholds
+// that drive compaction are a function of the content this test writes.
+func countOneTokenPerRune(t *testing.T) {
+	t.Helper()
+	prev := types.Estimator
+	types.Estimator = func(s string) int { return len([]rune(s)) }
+	t.Cleanup(func() { types.Estimator = prev })
+}
+
+// probeAgent is a minimal agent with a tiny context window, used to drive the
+// loop's own compaction deterministically.
+func newProbeAgent(t *testing.T, prov provider.Provider, maxTokens int) *BaseAgent {
+	t.Helper()
+	agent := newEchoCompletionAgent(t, prov)
+	agent.conversation.MaxTokens = maxTokens
+	agent.conversation.ResponseBuffer = 0
+	agent.systemPromptOverride = "You are a probe." // keep the system prompt out of the budget arithmetic
+	return agent
+}
+
+// A run whose conversation is compacted mid-run still reports its own
+// deliverable. Regression: result assembly used to rescan the transcript from
+// a message index recorded at run start, but trimming re-indexes the
+// transcript — a normally finished run could report an empty FinalText even
+// though it ended with attempt_completion.
+func TestRunResultAfterMidRunCompaction(t *testing.T) {
+	countOneTokenPerRune(t)
+	prov := provider.NewScriptedProvider(
+		provider.TurnScript{ToolCalls: []provider.ToolCall{echoCall("c1")}},
+		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c2", "first deliverable")}},
+		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c3", "second deliverable")}},
+	)
+	agent := newProbeAgent(t, prov, 500)
+
+	if _, err := agent.Run(context.Background(), "task one"); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	startMsgCount := agent.conversation.MessageCount()
+
+	cb := &recordingCallback{}
+	res, err := agent.RunWithCallback(context.Background(), strings.Repeat("x", 200), cb)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+
+	// Guard the scenario: the trim must have run during the second run and
+	// dropped the first run's messages, or this test proves nothing.
+	if len(cb.snapshot().compactionStarts) == 0 {
+		t.Fatal("test setup: no compaction ran during the second run")
+	}
+	if got := agent.conversation.MessageCount(); got >= startMsgCount+3 {
+		t.Fatalf("test setup: conversation kept %d of %d+%d messages; compaction did not fire mid-run", got, startMsgCount, 3)
+	}
+	for _, m := range agent.GetConversation().GetMessages() {
+		if m.Role == types.RoleUser && m.Content == "task one" {
+			t.Fatal("test setup: the first run's messages were not compacted away")
+		}
+	}
+
+	if res.FinalText != "second deliverable" {
+		t.Errorf("FinalText = %q, want this run's attempt_completion result (mid-run compaction must not blank it)", res.FinalText)
+	}
+}
+
+// A run that fails after mid-run compaction must not resurface an earlier
+// run's deliverable: with the previous index-into-transcript assembly the
+// under-shooting scan walked the whole transcript and reported the first
+// run's attempt_completion result as this run's FinalText.
+func TestRunResultNoCrossRunLeakAfterCompaction(t *testing.T) {
+	countOneTokenPerRune(t)
+	prov := provider.NewScriptedProvider(
+		provider.TurnScript{ToolCalls: []provider.ToolCall{echoCall("c1")}},
+		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c2", "first deliverable")}},
+		provider.TurnScript{Content: "second run analysis", ToolCalls: []provider.ToolCall{echoCall("c3")}},
+		provider.TurnScript{Err: errors.New("boom")},
+	)
+	agent := newProbeAgent(t, prov, 1000)
+
+	if _, err := agent.Run(context.Background(), "task one"); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	startMsgCount := agent.conversation.MessageCount()
+
+	cb := &recordingCallback{}
+	res, err := agent.RunWithCallback(context.Background(), strings.Repeat("x", 500), cb)
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("second run err = %v, want the stream error", err)
+	}
+
+	// Guard the scenario: the trim must have run during the second run, and
+	// the first run's deliverable is still in the shared conversation (there
+	// is something to leak).
+	if len(cb.snapshot().compactionStarts) == 0 {
+		t.Fatal("test setup: no compaction ran during the second run")
+	}
+	stillThere := false
+	for _, m := range agent.GetConversation().GetMessages() {
+		for _, tc := range m.ToolCalls {
+			if tc.Name == types.ToolAttemptCompletion.String() && strings.Contains(string(tc.Input), "first deliverable") {
+				stillThere = true
+			}
+		}
+	}
+	if !stillThere {
+		t.Fatal("test setup: the first run's deliverable was compacted away; nothing to leak")
+	}
+	if agent.conversation.MessageCount() < startMsgCount {
+		t.Fatalf("test setup: transcript shrank below the run-start count (%d < %d); the leak precondition is gone", agent.conversation.MessageCount(), startMsgCount)
+	}
+
+	if res.FinalText != "second run analysis" {
+		t.Errorf("FinalText = %q, want this run's own last assistant text (no cross-run leak)", res.FinalText)
 	}
 }
 

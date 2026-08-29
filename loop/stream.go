@@ -167,6 +167,10 @@ streamLoop:
 		ToolCalls:        typesToolCalls,
 	})
 
+	// Record what this turn delivered while it is fresh: run-scoped result
+	// assembly reads this capture, not the (compaction-prone) transcript.
+	run.recordAssistantTurn(fullContent, typesToolCalls)
+
 	return nil
 }
 

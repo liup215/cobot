@@ -30,6 +30,42 @@ loop/stream.go 预派发副作用白名单 case 里列有 "kb_ingest"/"browser_c
 
 ## 近期变更
 
+- 2026-08-29：**审查修复（问题 1-3，第 2 次执行收尾）**——审查不通过的
+  三项全部修正，红→绿均以仓库外探针程序验证（`replace` 指向修复前
+  worktree 复现、指向修复后通过）：
+  - **问题 1（必须修，flaky）**：`TestRunResultFromAttemptCompletion` 的
+    `res.Duration <= 0` 断言在 Windows 时钟粒度（~0.5-15ms）下子毫秒 run
+    必然概率挂（`-count=10` 实测 3/10 失败）。删除该行为断言（附原因
+    注释），改用确定性单测 `TestRunResultDurationMeasuredFromRunStart`
+    回拨 `run.startTime` 25ms 断言 `Duration >= 25ms`。
+  - **问题 2（中等）**：mid-run compaction 后正常结束的 run 报空
+    FinalText，甚至泄漏上一 run 的交付物。根因：extractFinalText 按
+    「run 起始消息数」索引转录本，compaction 重写后本 run 的消息落到
+    `startMsgCount` 之前，索引夹取与回扫都够不到终结消息。定稿改为
+    **turn 记录时捕获**：`runStats` 增 `finalText`/`lastAssistantText`
+    与 `recordAssistantTurn`（stream.go 在 append assistant 消息时调用）
+    + `finalDeliverable()`（终结工具参数优先，否则本 run 最后一条
+    assistant 文本）；删除 `extractFinalText` 与 `startMsgCount`。
+    复现参数：maxTokens=500/200 rune（空 FinalText）、maxTokens=1000/
+    500 rune（跨 run 泄漏）。回归测试
+    `TestRunResultAfterMidRunCompaction`、
+    `TestRunResultNoCrossRunLeakAfterCompaction`（均断言 compaction
+    确实触发），另有 `TestRunResultFinalTextCapturedAtTurnTime`
+    （Clear 后仍取到）、`TestRunResultLaterTerminalCallWins`。
+  - **问题 3（中等）**：同回合多 tool_call 时取消留下无工具结果的
+    畸形会话，下一次请求被 OpenAI 兼容端点 400 拒绝。修复：
+    `executeToolCalls` 改下标循环，取消/守卫中止时对「未执行的剩余
+    调用」逐个落占位工具结果（`recordSkippedToolResults`，
+    `[NOT EXECUTED] ...canceled/aborted...` 文案）再退出；守卫中止
+    同样覆盖。回归测试 `TestContextCancelMidBatchLeavesWellFormedConversation`
+    （含「换 provider 续跑下一次请求无未答 tool_call」）、
+    `TestGuardAbortLeavesWellFormedConversation`。
+  - 验收：`go build/vet/gofmt` 干净；`go test ./loop/ -count=10` 绿
+    （修复前 3/10 失败）；`go test -race -count=2 ./...` 6 包全绿；
+    `go list -m all` 仅本模块，依赖 0。
+  - 有意未动（低优先级 4-7 未在交接中具体化）：被取消 run 遗留的
+    `preDispatchedResults` map 条目跨 run 残留（同 ID 复用才可触发）。
+
 - 2026-08-29：**嵌入式宿主适配面完成**（详见决策表 2026-08-29 各行）：
   - loop/result.go（新）：RunResult 结构 + runStats 按 run 归口累计 +
     canceledError（"agent run canceled: %w"）/ canceledRunResult（4 个

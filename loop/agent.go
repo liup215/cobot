@@ -286,7 +286,7 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 
 	// Per-run accounting: FinalText / usage / turns are scoped to this run,
 	// even though the agent and its conversation are reused across runs.
-	run := newRunStats(a.conversation)
+	run := newRunStats()
 
 	// Each new user turn must reopen the conversation loop.
 	a.conversation.MarkIncomplete()

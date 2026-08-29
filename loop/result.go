@@ -35,6 +35,10 @@ type RunResult struct {
 	//     canceled context) falls back, best effort, to the last assistant
 	//     text produced during this run; empty when the model produced no
 	//     text.
+	//
+	// The deliverable is captured when the assistant turn is recorded, so
+	// compaction that rewrites the transcript mid-run can neither blank it
+	// nor surface an earlier run's text.
 	FinalText string
 
 	// InputTokens is the sum of the input-token usage the provider reported
@@ -68,23 +72,26 @@ type RunResult struct {
 // run on the same goroutine; pre-dispatch goroutines never touch it), so the
 // plain fields need no lock.
 type runStats struct {
-	// startMsgCount is the conversation length when the run began; only
-	// messages appended after it belong to this run (the agent and its
-	// conversation are reusable across runs).
-	startMsgCount int
-	startTime     time.Time
+	startTime time.Time
 
 	turns        int
 	inputTokens  int
 	outputTokens int
+
+	// finalText is the deliverable of a run-ending tool call
+	// (attempt_completion `result`, plan_mode_respond `response`), captured
+	// when the assistant turn carrying it is recorded. A later terminal call
+	// overwrites an earlier one, so a retried ending reports the attempt that
+	// actually ended the run.
+	finalText string
+	// lastAssistantText is the most recent assistant text of this run; the
+	// best-effort deliverable when no terminal tool call was made.
+	lastAssistantText string
 }
 
-// newRunStats starts accounting for a run over the given conversation.
-func newRunStats(conv *types.Conversation) *runStats {
-	return &runStats{
-		startMsgCount: conv.MessageCount(),
-		startTime:     time.Now(),
-	}
+// newRunStats starts accounting for a run.
+func newRunStats() *runStats {
+	return &runStats{startTime: time.Now()}
 }
 
 // addUsage records one turn's provider-reported usage. Streams deliver usage
@@ -106,12 +113,44 @@ func canceledError(ctx context.Context) error {
 	return nil
 }
 
+// recordAssistantTurn captures what the model delivered in an assistant turn
+// at the moment that turn is appended to the conversation: the deliverable of
+// a terminal tool call (attempt_completion `result`, plan_mode_respond
+// `response`) and the latest assistant text.
+//
+// Capturing here — instead of re-scanning the transcript when the result is
+// assembled — keeps the outcome stable under mid-run compaction. Trimming
+// rewrites and re-indexes the transcript, so a message index recorded at run
+// start no longer delimits this run's slice of the conversation: the run's own
+// messages can be dropped (blanking the result) and an under-shooting scan
+// would resurface the previous run's deliverable.
+func (r *runStats) recordAssistantTurn(content string, calls []types.ToolCall) {
+	for _, tc := range calls {
+		if text, ok := terminalToolText(tc); ok {
+			r.finalText = text
+		}
+	}
+	if strings.TrimSpace(content) != "" {
+		r.lastAssistantText = content
+	}
+}
+
+// finalDeliverable returns the text the agent delivered during this run: the
+// terminal tool call's deliverable when there was one, otherwise the last
+// assistant text it produced.
+func (r *runStats) finalDeliverable() string {
+	if r.finalText != "" {
+		return r.finalText
+	}
+	return r.lastAssistantText
+}
+
 // buildRunResult assembles the structured outcome of the run. err is the
 // terminal error (nil on success) and is stored in both the result and the
 // return value of RunWithCallback.
 func (a *BaseAgent) buildRunResult(run *runStats, err error) *RunResult {
 	return &RunResult{
-		FinalText:    a.extractFinalText(run.startMsgCount),
+		FinalText:    run.finalDeliverable(),
 		InputTokens:  run.inputTokens,
 		OutputTokens: run.outputTokens,
 		Turns:        run.turns,
@@ -146,44 +185,6 @@ func (a *BaseAgent) failTask(reason string) {
 	if err := a.store.FailTask(a.taskID, reason); err != nil {
 		logWarnf("Failed to mark task as failed: %v", err)
 	}
-}
-
-// extractFinalText returns the text the agent delivered during this run:
-// the terminal tool call's deliverable (attempt_completion `result`,
-// plan_mode_respond `response`) when there is one, otherwise the last
-// assistant text produced from message index fromIdx onwards.
-//
-// Only this run's slice of the conversation is considered, because an Agent
-// is reusable and earlier runs must not leak into this result.
-func (a *BaseAgent) extractFinalText(fromIdx int) string {
-	msgs := a.conversation.GetMessages()
-	if fromIdx < 0 || fromIdx > len(msgs) {
-		fromIdx = 0
-	}
-
-	// Preferred: the deliverable of the terminal tool call, scanning newest
-	// first so a retried ending (an earlier abandoned attempt_completion)
-	// cannot shadow the one that ended the run.
-	for i := len(msgs) - 1; i >= fromIdx; i-- {
-		m := msgs[i]
-		if m.Role != types.RoleAssistant {
-			continue
-		}
-		for j := len(m.ToolCalls) - 1; j >= 0; j-- {
-			if text, ok := terminalToolText(m.ToolCalls[j]); ok && text != "" {
-				return text
-			}
-		}
-	}
-
-	// Best effort: the last assistant text of this run.
-	for i := len(msgs) - 1; i >= fromIdx; i-- {
-		m := msgs[i]
-		if m.Role == types.RoleAssistant && strings.TrimSpace(m.Content) != "" {
-			return m.Content
-		}
-	}
-	return ""
 }
 
 // terminalToolText extracts the deliverable of a run-ending tool call
