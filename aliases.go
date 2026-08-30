@@ -38,6 +38,11 @@ type GuardedCall = loop.GuardedCall
 // ErrAbortRun is the sentinel a ToolGuard returns to abort the whole run.
 var ErrAbortRun = loop.ErrAbortRun
 
+// RunResult is the structured outcome of one agent run, returned by
+// Agent.Run and Agent.RunWithCallback: the delivered text, token usage,
+// turn count, duration and terminal error.
+type RunResult = loop.RunResult
+
 // Store persists tasks, messages and tool calls.
 type Store = loop.Store
 

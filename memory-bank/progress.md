@@ -95,7 +95,26 @@ tools ToolBehavior 系与 init.go 旁路 API 全部删除（净 -272 行）。
 **M3 完成（原生 Anthropic Messages 适配器：SSE 全事件 + thinking 独立通道 +
 cache_control + stop_reason 映射 + HTTPError/Retry-After；29 个测试
 `-race` 绿，provider 覆盖率 95-100%，零第三方依赖）。**
+**嵌入式宿主适配面完成（Maestro 集成前置，2026-08-29）**：
+结构化 `RunResult`（`Run`/`RunWithCallback` 返回 `(*RunResult, error)`，
+FinalText = attempt_completion `result` / plan_mode_respond `response`，
+无终结工具时 best-effort 取本次 run 最后一条 assistant 文本；token/turns/
+duration 按 run 归口累计）、ctx 取消语义钉死（中断流读取与工具执行——
+含预派发 goroutine，`errors.Is(err, context.Canceled)` 成立，
+`preDispatchWG.Wait()` 保证无 agent 自有 goroutine 跨 run 存活，
+`Abort()` 语义不变）、headless ask_followup 行为（回调错误文本作为工具
+结果回传、run 继续由模型自治）、`SystemPromptOverride` 宿主接管（完全
+替换默认提示词，AVAILABLE TOOLS 仍由 loop 渲染；守卫测试 override 模式
+跳过静态目录断言）。新增 22 个行为测试，`go test -race -count=2 ./...`
+6 包全绿，依赖仍为 0。
 下一步 M4：compaction（Trim 移植 + Summarize 新写）与工具行为定稿。
+**审查修复完成（2026-08-29 第 2 次执行）**：①flaky Duration 断言删除
+（Windows 时钟粒度，改确定性回拨单测）；②mid-run compaction 空
+FinalText/跨 run 泄漏改为 **turn 记录时捕获**（runStats.finalText/
+lastAssistantText，删除 extractFinalText 与 startMsgCount 索引法）；
+③同回合多 tool_call 取消/守卫中止时为未执行的调用落占位工具结果
+（recordSkippedToolResults），转录本跨 run 保持良构。红→绿均以仓库外
+探针验证；`-count=10 ./loop/` 绿、`-race -count=2 ./...` 6 包绿、依赖 0。
 
 ## Known Issues / 风险
 
@@ -128,3 +147,13 @@ cache_control + stop_reason 映射 + HTTPError/Retry-After；29 个测试
 | 2026-08-28 | SSE 按 payload 的 type 字段派发，event: 行兜底 | 代理/网关可能剥离 event 行；data 无 type 时才回退 |
 | 2026-08-28 | SSE 解析复用 openai.go 的 isValidJSON/isCompleteJSONObject 括号修复与 partial-chunk 语义 | 两个 provider 行为一致，loop 无需区分 |
 | 2026-08-28 | 模块/仓库改名 agentcore → cobot（go.mod、import、README、包注释、错误前缀全量清扫），系统提示词 agent 身份提为 `Config.AgentName`（默认 "cobot"） | 项目更名与 GitHub 仓库一致；硬编码模型身份不利于复用方品牌化 |
+| 2026-08-29 | **RunResult API 形态二选一：定稿为 `Run`/`RunWithCallback` 返回 `(*RunResult, error)`**，而非新增 `RunResult()` 查询方法 | 结果与产生它的 run 绑定（agent/conversation 可跨 run 复用），查询方法有 stale 状态与"哪一次 run"的歧义，宿主还得记 run 边界；v0.x 阶段允许破坏性签名变更，godoc 已写明语义 |
+| 2026-08-29 | RunResult 用量按 run 归口累计（runStats 从 run 起始消息数/时间起算），会话级 `GetActualTokens` 保持"最后回合"语义不变 | Conversation.AddActualTokens 是替换式（只存最近回合）；聚合视图属 run，不属会话；不改动既有会话语义 |
+| 2026-08-29 | ctx 取消 = 硬中断：processStream select ctx.Done（弃流先 drain，防 provider pump 卡死）、工具执行（含预派发 goroutine）以 ctx 收尾，`preDispatchWG.Wait()` 在 run defer 中等待 | 宿主需要可靠的打断原语；`errors.Is(err, context.Canceled)` 必须成立；取消不得消耗纠错环 mistake 配额（4 个检查点先查取消）；代价是忽略 ctx 的工具会推迟返回（godoc 已注明） |
+| 2026-08-29 | `Abort()` 保持协作式检查点语义不变（不强制打断进行中的流读取）；打断靠 ctx，两者并存时取消优先 | 任务要求 Abort 行为不变；TestAbortDoesNotUnblockStreamReadButContextDoes 钉住该契约并写进 Abort godoc |
+| 2026-08-29 | headless ask_followup：回调返回错误 → 错误文本作为该 tool_call 的工具结果回传，run 继续由模型自行决策（转 attempt_completion 或按假设继续） | Maestro 无人类可答；整 run 作废/panic/死锁都不可接受，模型自治最稳；每次错误都逐次回传（TestAskFollowupErrorRoundTripsEachTime） |
+| 2026-08-29 | `SystemPromptOverride` 非空时**完全替换**默认系统提示词（CustomRules/AgentName 被忽略），但 AVAILABLE TOOLS 段仍由 loop 依 Registry 渲染 | Maestro 自带完整中文角色提示词，需要替换而非累加；不渲染工具段模型就看不到任何工具 schema，只能由宿主手工重述每个 schema |
+| 2026-08-29 | 提示词↔Registry 守卫在 override 模式跳过静态目录断言，只校验"工具段存在 + ⊆ 当前模式 Registry + 无默认段落泄漏"；守卫构造 prompt 改走 `BaseAgent.systemPromptFor` 单一代码路径 | 宿主文本可合法提及宿主侧原生工具（submit_plan/update_step/report_progress 等），静态断言会误伤；单一代码路径防守卫与实现漂移 |
+| 2026-08-29 | **FinalText 改为 turn 记录时捕获**（runStats.finalText/lastAssistantText，stream.go append assistant 消息时 recordAssistantTurn），删除「按 run 起始消息数索引转录本」的 extractFinalText | mid-run compaction 重写转录本后 run 起始消息数失效（本 run 消息落到索引之前），索引法报空 FinalText 甚至取到上一 run 的交付物；捕获式对 compaction 天然免疫，且"重试后的终结调用覆盖前者"语义更清晰 |
+| 2026-08-29 | 测试禁止对 `RunResult.Duration > 0` 做行为断言（Windows 时钟粒度 ~0.5-15ms，子毫秒 run 报 0）；需要验证时长时回拨 `run.startTime` | `-count=10 ./loop/` 实测 3/10 概率挂；非确定性断言违反"新增行为测试 -race 绿"验收 |
+| 2026-08-29 | 取消/守卫中止时对同回合未执行的 tool_call 逐个落占位工具结果（[NOT EXECUTED] 文案）再退出，保证转录本跨 run 良构 | OpenAI 兼容端点要求 assistant tool_calls 后每条 tool_call_id 都有 tool 消息，否则下一次请求 400；占位结果同时让回调收到完整 OnToolCallComplete 序列 |

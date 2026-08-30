@@ -2,18 +2,90 @@
 
 ## 当前工作焦点
 
-**M3 原生 Anthropic Messages 适配器完成**：provider/anthropic.go（传输+SSE
-流式）+ provider/anthropic_wire.go（wire 类型与双向映射），registry 注册
-"anthropic"，29 个 httptest 逐事件断言测试 `-race` 绿，覆盖率 95-100%。
+**嵌入式宿主适配面完成（2026-08-29，Maestro 集成前置）**：
+- `loop/result.go` + `Run`/`RunWithCallback` 返回 `(*RunResult, error)`：
+  FinalText = attempt_completion `result`（或 plan_mode_respond `response`，
+  新到终结工具优先）、无终结工具时 best-effort 取本次 run 最后一条
+  assistant 文本；InputTokens/OutputTokens 为本次 run 各回合之和；
+  Turns/Duration/Err 同为 run 归口。已以「返回值」形态定稿并记入决策表
+  （否决 `RunResult()` 查询方法方案）。
+- ctx 取消语义钉死：中断流读取（弃流先 drain）与工具执行（含预派发
+  goroutine），返回包装 `context.Canceled`，`errors.Is` 成立；取消不消耗
+  mistake 配额；`preDispatchWG.Wait()` 保证无 agent 自有 goroutine 跨 run
+  存活；`Abort()` 保持协作式检查点语义不变（godoc 已钉死两者分工）。
+- headless ask_followup：回调错误文本作为工具结果回传，run 继续由模型自治。
+- `SystemPromptOverride`（Options/Config 双入口）：完全替换默认系统提示词，
+  AVAILABLE TOOLS 段仍由 loop 渲染；`prompts.ApplySystemPromptOverride`
+  导出实现；守卫测试 override 模式跳过静态目录断言。
+- 新测试：loop/result_test.go、loop/cancel_test.go、loop/headless_test.go、
+  prompts/system_test.go 补充、loop/prompt_guard_test.go override 守卫、
+  根包 facade 测试；`go test -race -count=2 ./...` 6 包全绿，依赖 0。
 下一步 **M4：compaction（Trim 移植 + Summarize 新写）与工具行为定稿**。
 
 **已知残留（有意保留，超出本次点名范围且删除会改行为）**：
-loop/stream.go:173 预派发副作用白名单 case 里列有 "kb_ingest"/"browser_copy"
+loop/stream.go 预派发副作用白名单 case 里列有 "kb_ingest"/"browser_copy"
 （剔除工具名）。该白名单是安全网——删除会使同名自定义工具变为可预派发
 （竞态风险），故保留。
 
 
 ## 近期变更
+
+- 2026-08-29：**审查修复（问题 1-3，第 2 次执行收尾）**——审查不通过的
+  三项全部修正，红→绿均以仓库外探针程序验证（`replace` 指向修复前
+  worktree 复现、指向修复后通过）：
+  - **问题 1（必须修，flaky）**：`TestRunResultFromAttemptCompletion` 的
+    `res.Duration <= 0` 断言在 Windows 时钟粒度（~0.5-15ms）下子毫秒 run
+    必然概率挂（`-count=10` 实测 3/10 失败）。删除该行为断言（附原因
+    注释），改用确定性单测 `TestRunResultDurationMeasuredFromRunStart`
+    回拨 `run.startTime` 25ms 断言 `Duration >= 25ms`。
+  - **问题 2（中等）**：mid-run compaction 后正常结束的 run 报空
+    FinalText，甚至泄漏上一 run 的交付物。根因：extractFinalText 按
+    「run 起始消息数」索引转录本，compaction 重写后本 run 的消息落到
+    `startMsgCount` 之前，索引夹取与回扫都够不到终结消息。定稿改为
+    **turn 记录时捕获**：`runStats` 增 `finalText`/`lastAssistantText`
+    与 `recordAssistantTurn`（stream.go 在 append assistant 消息时调用）
+    + `finalDeliverable()`（终结工具参数优先，否则本 run 最后一条
+    assistant 文本）；删除 `extractFinalText` 与 `startMsgCount`。
+    复现参数：maxTokens=500/200 rune（空 FinalText）、maxTokens=1000/
+    500 rune（跨 run 泄漏）。回归测试
+    `TestRunResultAfterMidRunCompaction`、
+    `TestRunResultNoCrossRunLeakAfterCompaction`（均断言 compaction
+    确实触发），另有 `TestRunResultFinalTextCapturedAtTurnTime`
+    （Clear 后仍取到）、`TestRunResultLaterTerminalCallWins`。
+  - **问题 3（中等）**：同回合多 tool_call 时取消留下无工具结果的
+    畸形会话，下一次请求被 OpenAI 兼容端点 400 拒绝。修复：
+    `executeToolCalls` 改下标循环，取消/守卫中止时对「未执行的剩余
+    调用」逐个落占位工具结果（`recordSkippedToolResults`，
+    `[NOT EXECUTED] ...canceled/aborted...` 文案）再退出；守卫中止
+    同样覆盖。回归测试 `TestContextCancelMidBatchLeavesWellFormedConversation`
+    （含「换 provider 续跑下一次请求无未答 tool_call」）、
+    `TestGuardAbortLeavesWellFormedConversation`。
+  - 验收：`go build/vet/gofmt` 干净；`go test ./loop/ -count=10` 绿
+    （修复前 3/10 失败）；`go test -race -count=2 ./...` 6 包全绿；
+    `go list -m all` 仅本模块，依赖 0。
+  - 有意未动（低优先级 4-7 未在交接中具体化）：被取消 run 遗留的
+    `preDispatchedResults` map 条目跨 run 残留（同 ID 复用才可触发）。
+
+- 2026-08-29：**嵌入式宿主适配面完成**（详见决策表 2026-08-29 各行）：
+  - loop/result.go（新）：RunResult 结构 + runStats 按 run 归口累计 +
+    canceledError（"agent run canceled: %w"）/ canceledRunResult（4 个
+    检查点：循环顶、建流失败、processStream 出错、工具执行后）/ 
+    terminalToolText（终结工具参数提取）+ failTask / extractFinalText。
+  - loop/agent.go：Run/RunWithCallback 签名改 (*RunResult, error)；Options
+    增 SystemPromptOverride；BaseAgent 增 systemPromptOverride 字段与
+    preDispatchWG；systemPromptFor 单一提示词构造路径；Abort godoc 钉死
+    "协作式检查点，不打断流读取，打断靠 ctx"。
+  - loop/stream.go：processStream 增 run 归口累计与 ctx.Done 分支（go
+    drainStream）；预派发 goroutine 纳入 preDispatchWG；preDispatchToolCall
+    入口加 abort/ctx 守卫。loop/toolexec.go：executeToolCalls 循环顶加
+    abort/ctx 检查。
+  - prompts/system.go：导出 ApplySystemPromptOverride（override 原文 +
+    buildToolSection；空 override 返回 "" 回退默认）。
+  - provider/scripted.go：TurnScript 增 InputTokens/OutputTokens（Done
+    chunk 携带 TokenUsage），供 run 级用量断言。
+  - 根包：cobot.go Config.SystemPromptOverride + 包注释示例更新；
+    aliases.go 增 RunResult 别名；README 快速上手改为 RunResult 形态并
+    说明覆盖/取消/headless 语义。
 
 - 2026-08-28：**M3 Anthropic 适配器完成**：
   - provider/anthropic.go（~680 行）：NewAnthropicProvider（key 空则读

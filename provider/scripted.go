@@ -25,6 +25,12 @@ type TurnScript struct {
 	// Delay, when non-zero, is slept before the Done chunk; tests can use
 	// it to exercise pre-dispatch overlap. Keep it tiny in tests.
 	Delay time.Duration
+
+	// InputTokens / OutputTokens, when non-zero, ride on the Done chunk as
+	// the turn's TokenUsage (like a real provider's final usage report), so
+	// tests can exercise usage accumulation across turns.
+	InputTokens  int
+	OutputTokens int
 }
 
 // ScriptedProvider plays back a canned sequence of turns, one per
@@ -106,7 +112,15 @@ func (p *ScriptedProvider) CreateMessageStream(ctx context.Context, req *Message
 			case <-time.After(t.Delay):
 			}
 		}
-		ch <- StreamChunk{Done: true}
+		var usage TokenUsage
+		if t.InputTokens > 0 || t.OutputTokens > 0 {
+			usage = TokenUsage{
+				InputTokens:  t.InputTokens,
+				OutputTokens: t.OutputTokens,
+				TotalTokens:  t.InputTokens + t.OutputTokens,
+			}
+		}
+		ch <- StreamChunk{Done: true, Usage: usage}
 	}()
 	return ch, nil
 }

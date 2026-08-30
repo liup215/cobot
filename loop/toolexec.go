@@ -12,12 +12,24 @@ import (
 // message. This is the main-loop execution path; pre-dispatched results
 // (computed while the SSE stream was still active) are used when available.
 // Every call passes through the ToolGuard (if configured) before execution.
+//
+// Every tool_call of the assistant message is answered by exactly one tool
+// result message — including the calls that are skipped because the run is
+// ending (canceled ctx, abort, guard-requested abort). A run may end here,
+// but the conversation outlives it: an unanswered tool_call_id makes the next
+// request invalid (OpenAI-compatible endpoints answer it with HTTP 400,
+// "An assistant message with 'tool_calls' must be followed by tool messages").
 func (a *BaseAgent) executeToolCalls(ctx context.Context, lastMsg types.Message, callback StreamCallback) {
 	// Execute tools. Pre-dispatched results (computed while the stream
 	// was still active) are used when available; otherwise tools run
 	// synchronously here.
-	for _, tc := range lastMsg.ToolCalls {
-		if a.abort.Load() {
+	for i := 0; i < len(lastMsg.ToolCalls); i++ {
+		tc := lastMsg.ToolCalls[i]
+
+		if a.abort.Load() || ctx.Err() != nil {
+			// Aborted or canceled: stop executing tools. The run's context is
+			// honored even for tools that ignore it (they receive it too).
+			a.recordSkippedToolResults(lastMsg.ToolCalls[i:], callback, skippedToolResultCanceled)
 			break
 		}
 
@@ -53,7 +65,10 @@ func (a *BaseAgent) executeToolCalls(ctx context.Context, lastMsg types.Message,
 		// reason back to the model as a tool result; the loop continues.
 		allow, denyReason, guardAbort := a.applyGuard(ctx, GuardedCall{Name: tc.Name, Input: string(tc.Input)})
 		if guardAbort {
+			// The guard wants the run over: this call and everything after it
+			// must still be answered before the run ends.
 			a.abort.Store(true)
+			a.recordSkippedToolResults(lastMsg.ToolCalls[i:], callback, skippedToolResultAborted)
 			return
 		}
 		if !allow {
@@ -169,6 +184,39 @@ func (a *BaseAgent) executeToolCalls(ctx context.Context, lastMsg types.Message,
 		case types.ToolAttemptCompletion.String(),
 			types.ToolPlanModeRespond.String():
 			a.conversation.SetComplete()
+		}
+	}
+}
+
+// skippedToolResultCanceled / skippedToolResultAborted are the tool results
+// recorded for a tool call that never ran because the run ended around it
+// (canceled context or an abort, respectively).
+const (
+	skippedToolResultCanceled = "[NOT EXECUTED] The run was canceled before this tool call was executed."
+	skippedToolResultAborted  = "[NOT EXECUTED] The run was aborted before this tool call was executed."
+)
+
+// recordSkippedToolResults answers every tool call the loop will not execute
+// with a placeholder tool result, keeping the transcript well-formed.
+//
+// An assistant message carrying tool_calls must be followed by one tool
+// message per tool_call_id. Those calls were already announced to the host
+// (OnToolCallStart fires when the call arrives in the stream), so each
+// placeholder also completes the callback pair; without it a run that ends
+// mid-batch leaves tool calls dangling forever in the UI.
+func (a *BaseAgent) recordSkippedToolResults(calls []types.ToolCall, callback StreamCallback, reason string) {
+	for _, tc := range calls {
+		a.conversation.AddMessage(types.Message{
+			Role:       types.RoleTool,
+			ToolCallID: tc.ID,
+			Content:    reason,
+		})
+		if callback != nil {
+			callback.OnToolCallComplete(ToolCall{
+				ID:    tc.ID,
+				Name:  tc.Name,
+				Input: string(tc.Input),
+			}, reason)
 		}
 	}
 }
