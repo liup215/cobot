@@ -98,7 +98,7 @@ func TestOptionsCompactionRunsInjectedStrategyAtBudgetHook(t *testing.T) {
 	agent.conversation.ResponseBuffer = 0
 
 	cb := &recordingCallback{}
-	if err := agent.RunWithCallback(context.Background(), prompt, cb); err != nil {
+	if _, err := agent.RunWithCallback(context.Background(), prompt, cb); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 

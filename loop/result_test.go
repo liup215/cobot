@@ -329,6 +329,26 @@ func newProbeAgent(t *testing.T, prov provider.Provider, maxTokens int) *BaseAge
 // a message index recorded at run start, but trimming re-indexes the
 // transcript — a normally finished run could report an empty FinalText even
 // though it ended with attempt_completion.
+//
+// rewriteHistoryStrategy makes the mid-run rewrite deterministic regardless
+// of the built-in Trim's retention rules (which protect the first user
+// message and the recent rounds): Compact replaces the history with only its
+// last two messages, so the run-start transcript is provably gone when result
+// assembly runs.
+type rewriteHistoryStrategy struct{ compacted bool }
+
+func (s *rewriteHistoryStrategy) ShouldCompact(*types.Conversation) bool { return true }
+
+func (s *rewriteHistoryStrategy) Compact(_ context.Context, conv *types.Conversation) error {
+	msgs := conv.GetMessages()
+	if len(msgs) > 2 {
+		msgs = msgs[len(msgs)-2:]
+	}
+	conv.ReplaceMessages(msgs)
+	s.compacted = true
+	return nil
+}
+
 func TestRunResultAfterMidRunCompaction(t *testing.T) {
 	countOneTokenPerRune(t)
 	prov := provider.NewScriptedProvider(
@@ -336,12 +356,13 @@ func TestRunResultAfterMidRunCompaction(t *testing.T) {
 		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c2", "first deliverable")}},
 		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c3", "second deliverable")}},
 	)
+	strategy := &rewriteHistoryStrategy{}
 	agent := newProbeAgent(t, prov, 500)
+	agent.compaction = strategy
 
 	if _, err := agent.Run(context.Background(), "task one"); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
-	startMsgCount := agent.conversation.MessageCount()
 
 	cb := &recordingCallback{}
 	res, err := agent.RunWithCallback(context.Background(), strings.Repeat("x", 200), cb)
@@ -349,13 +370,10 @@ func TestRunResultAfterMidRunCompaction(t *testing.T) {
 		t.Fatalf("second run: %v", err)
 	}
 
-	// Guard the scenario: the trim must have run during the second run and
-	// dropped the first run's messages, or this test proves nothing.
-	if len(cb.snapshot().compactionStarts) == 0 {
+	// Guard the scenario: the injected strategy must have rewritten the
+	// transcript during the second run, or this test proves nothing.
+	if !strategy.compacted {
 		t.Fatal("test setup: no compaction ran during the second run")
-	}
-	if got := agent.conversation.MessageCount(); got >= startMsgCount+3 {
-		t.Fatalf("test setup: conversation kept %d of %d+%d messages; compaction did not fire mid-run", got, startMsgCount, 3)
 	}
 	for _, m := range agent.GetConversation().GetMessages() {
 		if m.Role == types.RoleUser && m.Content == "task one" {
