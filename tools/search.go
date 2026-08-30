@@ -156,9 +156,14 @@ type SearchResult struct {
 
 // SearchFilesOutput represents the output of search_files tool.
 type SearchFilesOutput struct {
-	Results      []SearchResult `json:"results"`
-	TotalFiles   int            `json:"total_files"`
-	TotalMatches int            `json:"total_matches"`
+	Results []SearchResult `json:"results"`
+	// TotalFiles is the number of files that were searched.
+	TotalFiles int `json:"total_files"`
+	// TotalMatches is the number of matches found before capping; Results may
+	// hold fewer when the cap applied.
+	TotalMatches int `json:"total_matches"`
+	// Truncated is true when Results was capped at maxSearchResults.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // NewSearchFilesTool creates a new search_files tool.
@@ -250,10 +255,11 @@ func (t *SearchFilesTool) Execute(ctx context.Context, input json.RawMessage) (s
 	// Search in files concurrently.
 	output := searchFilesConcurrent(ctx, files, srh)
 
-	// Cap results to avoid huge payloads.
-	if len(output.Results) > maxSearchResults {
+	// Cap the returned results but keep the true match count so the model can
+	// tell that the list was cut short.
+	output.Truncated = len(output.Results) > maxSearchResults
+	if output.Truncated {
 		output.Results = output.Results[:maxSearchResults]
-		output.TotalMatches = maxSearchResults
 	}
 
 	// Store in cache.
@@ -340,12 +346,19 @@ func searchFilesConcurrent(ctx context.Context, files []string, srh searcher) *S
 	}
 	output.TotalMatches = len(output.Results)
 
-	// Sort by path, then line number.
-	sort.Slice(output.Results, func(i, j int) bool {
-		if output.Results[i].Path != output.Results[j].Path {
-			return output.Results[i].Path < output.Results[j].Path
+	// Sort by path, then line number, then column. The sort is stable so that
+	// two matches on the same position keep their discovery order, and the
+	// column tiebreaker makes the order fully deterministic for a repeated
+	// search over the same tree.
+	sort.SliceStable(output.Results, func(i, j int) bool {
+		a, b := output.Results[i], output.Results[j]
+		if a.Path != b.Path {
+			return a.Path < b.Path
 		}
-		return output.Results[i].Line < output.Results[j].Line
+		if a.Line != b.Line {
+			return a.Line < b.Line
+		}
+		return a.Column < b.Column
 	})
 
 	return output
@@ -492,7 +505,8 @@ func searchInFile(path string, srh searcher) ([]SearchResult, error) {
 	return results, nil
 }
 
-// formatSearchResults formats search results for display.
+// formatSearchResults formats search results for display. When the result list
+// was capped, a trailing notice reports how many matches were left out.
 func formatSearchResults(output *SearchFilesOutput) string {
 	if len(output.Results) == 0 {
 		return fmt.Sprintf("No matches found in %d files.", output.TotalFiles)
@@ -520,6 +534,12 @@ func formatSearchResults(output *SearchFilesOutput) string {
 			builder.WriteString(r.Context)
 			builder.WriteByte('\n')
 		}
+	}
+
+	if output.Truncated {
+		fmt.Fprintf(&builder,
+			"\n[Results truncated: %d of %d matches shown. Narrow the regex or the path to see the rest.]\n",
+			len(output.Results), output.TotalMatches)
 	}
 
 	return builder.String()
@@ -620,13 +640,15 @@ func (t *ListCodeDefinitionNamesTool) Execute(ctx context.Context, input json.Ra
 
 	// Analyze each file
 	allDefs := make([]CodeDefinition, 0, 64)
+	truncated := false
 	for _, file := range files {
 		defs := analyzeFile(file)
-		allDefs = append(allDefs, defs...)
-		if len(allDefs) >= maxDefinitionResults {
-			allDefs = allDefs[:maxDefinitionResults]
+		if len(allDefs)+len(defs) > maxDefinitionResults {
+			allDefs = append(allDefs, defs[:maxDefinitionResults-len(allDefs)]...)
+			truncated = true
 			break
 		}
+		allDefs = append(allDefs, defs...)
 	}
 
 	// Store in cache.
@@ -640,7 +662,13 @@ func (t *ListCodeDefinitionNamesTool) Execute(ctx context.Context, input json.Ra
 	listDefCacheMu.Unlock()
 
 	// Format output
-	return formatCodeDefinitions(allDefs), nil
+	out := formatCodeDefinitions(allDefs)
+	if truncated {
+		out += fmt.Sprintf(
+			"\n[Definitions truncated at %d entries. Narrow the path or the file_pattern to see the rest.]\n",
+			maxDefinitionResults)
+	}
+	return out, nil
 }
 
 // analyzeFile analyzes a single file for code definitions
@@ -837,7 +865,9 @@ func analyzeGenericCode(path string, content string) []CodeDefinition {
 	return defs
 }
 
-// formatCodeDefinitions formats code definitions for display
+// formatCodeDefinitions formats code definitions for display. Files are listed
+// in sorted path order and definitions within a file in line order, so the
+// output is identical for identical inputs.
 func formatCodeDefinitions(defs []CodeDefinition) string {
 	if len(defs) == 0 {
 		return "No code definitions found."
@@ -845,14 +875,25 @@ func formatCodeDefinitions(defs []CodeDefinition) string {
 
 	// Group by file
 	fileDefs := make(map[string][]CodeDefinition)
+	files := make([]string, 0, len(defs))
 	for _, d := range defs {
+		if _, ok := fileDefs[d.File]; !ok {
+			files = append(files, d.File)
+		}
 		fileDefs[d.File] = append(fileDefs[d.File], d)
 	}
+	sort.Strings(files)
 
 	var builder strings.Builder
 	builder.WriteString(fmt.Sprintf("Found %d definitions:\n\n", len(defs)))
 
-	for file, definitions := range fileDefs {
+	for _, file := range files {
+		definitions := fileDefs[file]
+		// Keep per-file line order stable regardless of how the file was
+		// analyzed.
+		sort.SliceStable(definitions, func(i, j int) bool {
+			return definitions[i].Line < definitions[j].Line
+		})
 		builder.WriteString(fmt.Sprintf("📄 %s\n", file))
 		for _, d := range definitions {
 			icon := "🔧"

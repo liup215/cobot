@@ -10,6 +10,18 @@ import (
 	"unicode"
 )
 
+// Read limits shared by read_file. Files above MaxReadFileBytes are returned
+// truncated from the head with an explicit notice (never silently, never as a
+// hard refusal), and a requested line range above MaxReadRangeBytes is
+// truncated the same way.
+const (
+	// MaxReadFileBytes caps a whole-file read.
+	MaxReadFileBytes = 64 * 1024
+
+	// MaxReadRangeBytes caps a start_line/end_line range read.
+	MaxReadRangeBytes = 100 * 1024
+)
+
 // ReadFileTool reads the contents of a file
 type ReadFileTool struct {
 	BaseTool
@@ -45,8 +57,13 @@ func NewReadFileTool() *ReadFileTool {
 
 	return &ReadFileTool{
 		BaseTool: BaseTool{
-			name:        "read_file",
-			description: "Read the contents of a file at the specified path. For large files (over ~100KB or ~4000 tokens), only specific line ranges should be read. Prefer search_files first to find the relevant sections, then use start_line/end_line to read only that range.",
+			name: "read_file",
+			description: fmt.Sprintf(
+				"Read the contents of a file at the specified path. Whole-file reads are capped at "+
+					"%dKB and line-range reads at %dKB; anything larger is returned truncated from the "+
+					"head with a notice reporting the total size. Prefer search_files first to find the "+
+					"relevant sections, then use start_line/end_line to read only that range.",
+				MaxReadFileBytes/1024, MaxReadRangeBytes/1024),
 			inputSchema: schema,
 		},
 	}
@@ -91,30 +108,28 @@ func (t *ReadFileTool) Execute(ctx context.Context, input json.RawMessage) (stri
 		if err != nil {
 			return "", fmt.Errorf("invalid line range: %w", err)
 		}
-		// Even for ranges, enforce a soft token/byte cap so an enormous range
-		// cannot explode the context.
-		const maxRangeSize = 100 * 1024
-		if len(sliced) > maxRangeSize {
-			return fmt.Sprintf("%s...\n\n[Range truncated: requested lines %d-%d, %d bytes total, showing first %d bytes]",
-				string(sliced[:maxRangeSize]), start, end, len(sliced), maxRangeSize), nil
+		// Even for ranges, enforce a byte cap so an enormous range cannot
+		// explode the context. The cut backs off to a rune boundary so a
+		// multi-byte character is never split in half.
+		if len(sliced) > MaxReadRangeBytes {
+			head := truncateUTF8Prefix(string(sliced), MaxReadRangeBytes)
+			return fmt.Sprintf("%s\n\n[Range truncated: requested lines %d-%d, %d bytes total, showing first %d bytes. Re-read with a narrower range for the rest.]",
+				head, start, end, len(sliced), len(head)), nil
 		}
 		return fmt.Sprintf("[Lines %d-%d of %s]\n%s", start, end, path, string(sliced)), nil
 	}
 
-	// Large file guard: do not return the full content directly. Ask the
-	// caller to narrow down using search/range or request a summary.
-	const largeFileByteThreshold = 100 * 1024
-	const largeFileTokenEstimate = 4000
-	approxTokens := estimateTokensFromBytes(content)
-	if len(content) > largeFileByteThreshold || approxTokens > largeFileTokenEstimate {
+	// Large-file strategy: return the head of the file with an explicit
+	// truncation notice instead of refusing, so the model keeps working
+	// context (imports, types, first definitions) and knows exactly what it
+	// did not see.
+	if len(content) > MaxReadFileBytes {
 		lineCount := countLines(content)
+		head := truncateUTF8Prefix(string(content), MaxReadFileBytes)
 		return fmt.Sprintf(
-			"[File too large: %s (%d bytes, ~%d tokens, %d lines).]\n"+
-				"Please narrow down what you need by using one of the following approaches:\n"+
-				"1. Use search_files to find relevant sections.\n"+
-				"2. Use read_file with start_line and end_line to read a specific range.\n"+
-				"3. Ask for a high-level summary if you only need an overview.",
-			path, len(content), approxTokens, lineCount,
+			"%s\n\n[File truncated: %s is %d bytes and %d lines, showing the first %d bytes. "+
+				"Use start_line/end_line for a specific range or search_files to locate sections.]",
+			head, path, len(content), lineCount, len(head),
 		), nil
 	}
 
@@ -136,8 +151,11 @@ type WriteFileInput struct {
 func NewWriteFileTool() *WriteFileTool {
 	return &WriteFileTool{
 		BaseTool: BaseTool{
-			name:        "write_to_file",
-			description: "Write content to a file at the specified path. If the file exists, it will be overwritten. Use this when creating new files or completely rewriting existing files.",
+			name: "write_to_file",
+			description: "Write content to a file at the specified path. If the file exists, it will be overwritten " +
+				"atomically: the new content is written to a temporary file and renamed into place, so a failed " +
+				"write never destroys the previous content. Use this when creating new files or completely " +
+				"rewriting existing files.",
 			inputSchema: PathAndContentSchema,
 		},
 	}
@@ -169,8 +187,8 @@ func (t *WriteFileTool) Execute(ctx context.Context, input json.RawMessage) (str
 		existed = true
 	}
 
-	// Write file
-	if err := os.WriteFile(path, []byte(req.Content), 0644); err != nil {
+	// Write file atomically: on any failure the previous content survives.
+	if err := writeFileAtomic(path, []byte(req.Content)); err != nil {
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
@@ -180,6 +198,48 @@ func (t *WriteFileTool) Execute(ctx context.Context, input json.RawMessage) (str
 	}
 
 	return fmt.Sprintf("File %s successfully: %s (%d bytes)", action, path, len(req.Content)), nil
+}
+
+// writeFileAtomic replaces path with data through a temporary file in the same
+// directory followed by a rename, so readers never observe a partial file and
+// a failed write leaves the original untouched. The previous file's mode is
+// preserved; new files get 0644.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	mode := os.FileMode(0644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 // ReplaceInFileTool replaces content in a file using SEARCH/REPLACE blocks
@@ -247,15 +307,18 @@ func NewReplaceInFileTool() *ReplaceInFileTool {
 
 	return &ReplaceInFileTool{
 		BaseTool: BaseTool{
-			name:        "replace_in_file",
-			description: "Replace specific content in a file using exact search/replace. Supports single blocks or an array of replacements for multiple edits. Use this for targeted modifications to existing files.",
+			name: "replace_in_file",
+			description: "Replace specific content in a file using exact search/replace. Supports single blocks or an " +
+				"array of replacements for multiple edits. All blocks are applied to an in-memory copy first: if any " +
+				"block fails to match, the file is left untouched and the error names the failing block. The result is " +
+				"written back atomically. Use this for targeted modifications to existing files.",
 			inputSchema: schema,
 		},
 	}
 }
 
-// Execute replaces content in the file with full error feedback,
-// multi-block support, whitespace tolerance, and diff output.
+// Execute replaces content in the file with full error feedback, multi-block
+// support, whitespace tolerance, and diff output.
 func (t *ReplaceInFileTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var req ReplaceInFileInput
 	if err := ParseInput(input, &req); err != nil {
@@ -323,8 +386,8 @@ func (t *ReplaceInFileTool) Execute(ctx context.Context, input json.RawMessage) 
 		results = append(results, fmt.Sprintf("Block %d: replaced at byte offset %d", i+1, idx))
 	}
 
-	// Write back
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	// Write back atomically: a failed write leaves the original file intact.
+	if err := writeFileAtomic(path, []byte(content)); err != nil {
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
@@ -566,14 +629,6 @@ func sliceLines(content []byte, startLine, endLine int) ([]byte, int, int, error
 	return []byte(out), startLine, effectiveEnd, nil
 }
 
-// estimateTokensFromBytes gives a conservative token estimate from raw bytes.
-func estimateTokensFromBytes(b []byte) int {
-	// Approximate: 1 token per 3 bytes for ASCII-heavy text; 1 token per byte
-	// for CJK-heavy text. We use a middle ground of 1 token per 2 bytes to be
-	// conservative without overcounting pure ASCII.
-	return len(b) / 2
-}
-
 // countLines returns the number of newline-separated lines.
 func countLines(content []byte) int {
 	return strings.Count(string(content), "\n") + 1
@@ -650,20 +705,38 @@ func (t *ListFilesTool) Execute(ctx context.Context, input json.RawMessage) (str
 	return result.String(), nil
 }
 
+// MaxListEntries caps how many directory entries list_files reports. The
+// remaining count is reported in a trailing notice.
+const MaxListEntries = 500
+
+// listFiles writes the directory listing. os.ReadDir returns entries sorted by
+// filename, which the tool relies on for stable output.
 func listFiles(path string, result *strings.Builder) error {
+	return listFilesUpTo(path, result, MaxListEntries)
+}
+
+// listFilesUpTo writes at most max entries and appends a truncation notice when
+// the directory holds more.
+func listFilesUpTo(path string, result *strings.Builder, max int) error {
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return fmt.Errorf("failed to read directory: %w", err)
 	}
 
+	shown := 0
 	for _, entry := range entries {
-		prefix := "  "
+		if max > 0 && shown >= max {
+			fmt.Fprintf(result,
+				"\n[Listing truncated: %d of %d entries shown. Narrow the path to see the rest.]\n",
+				shown, len(entries))
+			return nil
+		}
+		prefix := "📄 "
 		if entry.IsDir() {
 			prefix = "📁 "
-		} else {
-			prefix = "📄 "
 		}
 		result.WriteString(fmt.Sprintf("%s%s\n", prefix, entry.Name()))
+		shown++
 	}
 
 	return nil

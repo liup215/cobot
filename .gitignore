@@ -8,8 +8,10 @@
 .idea/
 .vscode/
 
-# Maestro session-local MCP config (per-session URL / task_id, never shared)
+# Maestro session-local files (per-session URL / task_id / commit message
+# scratch, never shared)
 .maestro-mcp.json
+.git-commit-msg.txt
 
 # Go
 vendor/
