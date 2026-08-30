@@ -2,6 +2,22 @@
 
 ## 当前工作焦点
 
+**M4 审查修复复验通过（2026-08-30，第 2 次续跑会话）**：
+- 修复已在 commit f2f8ec3f84fb 落地（工作树干净），本次未重做，只做复验：
+  - `go test ./... -race -count=2` 7 包全绿；`go build ./...`、`go vet ./...`、
+    `gofmt -l` 干净；`go list -m all` 仅本模块（零第三方依赖）。
+  - 变异验证两条（临时改动后立即恢复，仓库无残留）：
+    1) 还原 summarize.go 的 `firstUser < cut` 守卫 →
+       TestSummarizeRestoredToolFirstHistoryDoesNotDuplicateTask 红，
+       复现出审查所述"任务消息出现两次"；
+    2) 注释 loop/agent.go 60% 挂点的 runCompaction 调用 →
+       TestOptionsCompactionRunsInjectedStrategyAtBudgetHook 红
+       （"Compact called 0 times"）。
+- 会话残留清理：`.git-commit-msg.txt` 是 Maestro 会话的提交信息临时文件，
+  被上次会话随修复提交一并 `git add` 进了仓库（dc88baf 中不存在），
+  已 `git rm --cached` 并加入 .gitignore（与 .maestro-mcp.json 同类），
+  磁盘上的文件保留，不影响提交流程。
+
 **M4 审查修复完成（2026-08-30）**：
 - compact/summarize.go Compact() 的任务消息回插守卫收紧为
   `firstUser >= 0 && firstUser < cut`：历史不以 user 消息开头（预发送硬修剪

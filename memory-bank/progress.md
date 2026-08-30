@@ -154,8 +154,17 @@
       中文/emoji 输出不再在截断边缘产生 U+FFFD（utf8_test.go 全覆盖）
 - [x] 验收：`go test ./... -race -count=2` 全绿（7 包）；`go list -m all`
       仅本模块；gofmt/vet 干净
+- [x] 复验（2026-08-30 第 2 次续跑会话，commit f2f8ec3f84fb 已落地、未重做）：
+      两条变异验证复跑均红——还原 `firstUser < cut` 守卫 →
+      TestSummarizeRestoredToolFirstHistoryDoesNotDuplicateTask 复现双任务
+      消息；注释 60% 挂点 runCompaction → loop 接线测试
+      "Compact called 0 times"。改动均已恢复，仓库无残留。附带清理：
+      `.git-commit-msg.txt`（Maestro 会话提交信息临时文件）被上次会话误
+      提交进仓库，已 `git rm --cached` + .gitignore（与 .maestro-mcp.json
+      同类会话本地文件，磁盘文件保留）
 
-### M5 文档与发布- [ ] examples：basic / streaming / custom-tool / guard（均可离线 go run）
+### M5 文档与发布
+- [ ] examples：basic / streaming / custom-tool / guard（均可离线 go run）
 - [ ] README 中英 + godoc 清理
 - [ ] Maestro embedded 后端接入（runner 新后端与 claude/pi 并列）
 - [ ] v0.1.0 tag + `gh release create`
@@ -238,3 +247,4 @@ godoc 清理 + Maestro embedded 后端接入。
 | 2026-08-29 | 交互三件套行为用测试钉死（attempt_completion 必填 result；plan_mode_respond 原样回显；ask_followup 走可注入 handler 且支持按选项序号作答） | 任务要求“行为定稿并写入 godoc/README”；未定稿的隐式行为无法被复用方依赖 |
 | 2026-08-30 | Summarize 的任务消息回插守卫收紧为 `firstUser >= 0 && firstUser < cut`（与构造 dropped 集合的循环同边界） | 历史不以 user 开头时首条用户消息落在保留窗口起点，旧守卫会把它既留在 body[cut:] 又插到摘要前（任务消息出现两次）；Trim 的对应循环本就按该边界处理，补测试钉住 parity |
 | 2026-08-30 | 字节截断改 rune 边界安全：tools/utf8.go 的 truncateUTF8Prefix/Suffix 供 execute_command（32KB 头尾）与 read_file（64KB 整文件 / 100KB 行区间）三处使用；截断通知改报实际展示字节数 | 普通字节切割会在 64KB/100KB/32KB 边界把中文/emoji 劈成 U+FFFD 污染模型上下文；回退切割点至多让出 3 字节，字节上限语义保持 |
+| 2026-08-30 | `.git-commit-msg.txt`（Maestro 会话的提交信息临时文件）加入 .gitignore 并解除跟踪 | 上次会话把它随修复提交一并 add 进了仓库（dc88baf 中不存在）；不处理则每次提交都会带来脏 diff |
