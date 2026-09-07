@@ -2,6 +2,37 @@
 
 ## 当前工作焦点
 
+**M5 发布收尾完成（2026-09-07）**：
+- examples 四件套新建（均可离线 `go run ./examples/<name>`，scripted provider 回放，
+  无需 API key）：
+  - `examples/basic`：最小 Config（注入 Provider）+ Run，打印 RunResult（FinalText/
+    tokens/turns/duration）；
+  - `examples/streaming`：RunWithCallback + 自定义 Callback（嵌入 CallbackAdapter
+    只覆盖 OnStreamStart/OnContent/OnToolCallStart/OnToolCallComplete），两轮脚本
+    真实执行内置 list_files；
+  - `examples/custom-tool`：weatherTool 实现 tools.Tool 四方法 +
+    `InitDefaultRegistry().Register(&ToolInfo{...})` 注入（Maestro 内置工具注入的
+    同款方式）；计数器显示 executions 可能为 2——预派发 + 流瞬时完成的双执行
+    best-effort 语义，已在示例注释中说明（副作用工具应设 RequiresConfirmation）；
+  - `examples/guard`：三态各起一个 agent——放行（真执行 echo）、deny（`[DENIED]`
+    回传模型后模型改道 attempt_completion）、ErrAbortRun（run 干净结束 err=nil、
+    turns=1、工具未执行）。
+- README 双语：README.md（中文）重写 + README_EN.md（英文）新建——徽章
+  （release v0.1.0/go 1.25/deps 0/MIT/tests）、快速开始、Config 全字段表（19 项含
+  M4 compaction 三字段）、嵌入指南（注册工具/接管系统提示词/读取 RunResult/流式
+  回调+Guard+Store+压缩调优）、M4 工具行为定稿表对齐（补 rune 边界截断、headless
+  ask_followup 错误回传）、「版本与发布」段声明 v0.1.0 = M0–M3、M4/M5 在 main。
+- godoc 清理：补 provider.MockScenario、HTTPError.Error、ScriptedProvider 三访问器、
+  StreamCallbackAdapter 方法组注释；全库 grep 无 TODO/FIXME 残留（mock.go 命中的
+  是测试夹具文案）。
+- release：`gh release create v0.1.0`（title "M0–M3 foundation release"）。tag 早已
+  打在 4eb4858、未移动；notes 明确写清 tag 范围 = M0–M3（此时 Run 尚返回 error、
+  无 compact 包、无 examples）+ 已知限制，指路 v0.1.1/v0.2.0 承载 main 内容。
+- 验收：四个 example go run 输出符合预期；`go build/vet/gofmt` 干净；
+  `go test ./...` 全绿；gh release view v0.1.0 存在。
+- 有意不勾选：progress.md 的 "Maestro embedded 后端接入"（不在本任务范围，
+  评审意见①明确不得代勾）。
+
 **M4 审查修复复验通过（2026-08-30，第 2 次续跑会话）**：
 - 修复已在 commit f2f8ec3f84fb 落地（工作树干净），本次未重做，只做复验：
   - `go test ./... -race -count=2` 7 包全绿；`go build ./...`、`go vet ./...`、
@@ -296,10 +327,10 @@ loop/stream.go 预派发副作用白名单 case 里列有 "kb_ingest"/"browser_c
 
 ## 下一步（按里程碑顺序）
 
-1. **M5 文档与发布**：
-   - examples：basic / streaming / custom-tool / guard（均可离线 go run）。
-   - README 中英 + godoc 清理（README 已含 compaction 与工具行为表，可作底稿）。
-   - Maestro embedded 后端接入（runner 新后端与 claude/pi 并列）→ tag v0.1.0。
+1. **M5 唯一遗留**：Maestro embedded 后端接入（runner 新后端与 claude/pi 并列）——
+   参考实现 = examples/ 四件套 + README 嵌入指南。
+2. 路线图 M0–M5 其余项全部完成；候选方向：v0.1.1（承载 M4/M5 交付物的发布 tag）、
+   v0.2 候选（路径沙箱、Anthropic thinking 签名持久化）。
 
 ## 活跃决策
 
@@ -333,7 +364,11 @@ loop/stream.go 预派发副作用白名单 case 里列有 "kb_ingest"/"browser_c
   system 块（缓存以 marker 结尾的最长前缀）。
 - **Anthropic SSE 按 payload type 派发**：data 无 type 才回退 event: 行；
   畸形/未知事件一律忽略不毒化流。
-- 仓库推送已提前完成；tag/release 留到 M5。
+- 仓库推送已提前完成；v0.1.0 tag 已打在 4eb4858（M0–M3 完成点，为让 Maestro
+  `go get` 稳定引用而先行打标）且**不移动**；2026-09-07 补建 GitHub release
+  （notes 按 M0–M3 范围写明 + 已知限制，main 上的 M4/M5 内容随 v0.1.1/v0.2.0）。
+- M5 发布收尾（examples/README/release）完成于 2026-09-07；Maestro embedded
+  接入是 M5 唯一遗留，独立任务处理。
 
 ## 经验与洞察（来自调研）
 
