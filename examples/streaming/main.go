@@ -1,8 +1,9 @@
 // Command streaming demonstrates the streaming event surface: run the agent
 // with RunWithCallback and a Callback implementation that embeds
-// StreamCallbackAdapter (no-op base) and overrides only the events it cares
-// about — OnContent for assistant text deltas and OnToolCallStart /
-// OnToolCallComplete for tool lifecycle.
+// cobot.CallbackAdapter (the root package's re-export of
+// provider.StreamCallbackAdapter — a no-op base) and overrides only the
+// events it cares about — OnContent for assistant text deltas and
+// OnToolCallStart / OnToolCallComplete for tool lifecycle.
 //
 // Like every example it runs fully offline on a scripted provider:
 //

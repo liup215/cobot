@@ -37,7 +37,16 @@ func runScenario(name string, guard cobot.ToolGuard, turns ...provider.TurnScrip
 	}
 	res, err := agent.Run(context.Background(), "clean up the temp directory")
 	fmt.Printf("── %s\n", name)
-	fmt.Printf("   err=%v turns=%d final=%q\n", err, res.Turns, res.FinalText)
+	if err != nil {
+		// By Run's contract res is non-nil on error paths too (except
+		// concurrent-run misuse), but a host should always check err first.
+		fmt.Printf("   run failed: %v\n", err)
+		if res != nil {
+			fmt.Printf("   partial result: turns=%d final=%q\n", res.Turns, res.FinalText)
+		}
+		return
+	}
+	fmt.Printf("   err=<nil> turns=%d final=%q\n", res.Turns, res.FinalText)
 }
 
 func main() {
