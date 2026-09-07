@@ -25,9 +25,13 @@
 - godoc 清理：补 provider.MockScenario、HTTPError.Error、ScriptedProvider 三访问器、
   StreamCallbackAdapter 方法组注释；全库 grep 无 TODO/FIXME 残留（mock.go 命中的
   是测试夹具文案）。
-- release：`gh release create v0.1.0`（title "M0–M3 foundation release"）。tag 早已
-  打在 4eb4858、未移动；notes 明确写清 tag 范围 = M0–M3（此时 Run 尚返回 error、
-  无 compact 包、无 examples）+ 已知限制，指路 v0.1.1/v0.2.0 承载 main 内容。
+- release：**待发**。tag 早已打在 4eb4858、未移动；notes 稿已定稿（/tmp/
+  release-notes-v0.1.0.md，内容备份在任务记录流与 progress.md：tag 范围 = M0–M3，
+  此时 Run 尚返回 error、无 compact 包、无 examples；Highlights 六条 + Known
+  limitations 七条，指路 v0.1.1/v0.2.0 承载 main 内容）。2026-09-07 深夜执行
+  `gh release create v0.1.0` 时遭遇 api.github.com 中断 + 权限分类器
+  （ark-code-latest）持续超时的双重外部故障，重试 15+ 次未恢复，被迫中止；
+  续跑时网络/分类器恢复后执行该命令并 `gh release view v0.1.0` 验证即收尾。
 - 验收：四个 example go run 输出符合预期；`go build/vet/gofmt` 干净；
   `go test ./...` 全绿；gh release view v0.1.0 存在。
 - 有意不勾选：progress.md 的 "Maestro embedded 后端接入"（不在本任务范围，
@@ -327,10 +331,14 @@ loop/stream.go 预派发副作用白名单 case 里列有 "kb_ingest"/"browser_c
 
 ## 下一步（按里程碑顺序）
 
-1. **M5 唯一遗留**：Maestro embedded 后端接入（runner 新后端与 claude/pi 并列）——
+1. **立即收尾**：`gh release create v0.1.0 --title "cobot v0.1.0 — M0–M3
+   foundation release" --notes-file /tmp/release-notes-v0.1.0.md`（notes 稿若已被
+   清理，按 progress.md M5 段/任务记录流重写），`gh release view v0.1.0` 验证后
+   把 progress.md M5 的 release 项勾选为 [x]。
+2. **M5 唯一遗留**：Maestro embedded 后端接入（runner 新后端与 claude/pi 并列）——
    参考实现 = examples/ 四件套 + README 嵌入指南。
-2. 路线图 M0–M5 其余项全部完成；候选方向：v0.1.1（承载 M4/M5 交付物的发布 tag）、
-   v0.2 候选（路径沙箱、Anthropic thinking 签名持久化）。
+3. 候选方向：v0.1.1（承载 M4/M5 交付物的发布 tag）、v0.2 候选（路径沙箱、
+   Anthropic thinking 签名持久化）。
 
 ## 活跃决策
 
