@@ -30,6 +30,7 @@ type HTTPError struct {
 	Err error
 }
 
+// Error implements the error interface with the server-provided message.
 func (e *HTTPError) Error() string { return e.Message }
 
 // Unwrap exposes the underlying network error for errors.Is/As chains.

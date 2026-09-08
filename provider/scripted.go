@@ -143,6 +143,12 @@ func (p *ScriptedProvider) CreateMessage(ctx context.Context, req *MessageReques
 	}, nil
 }
 
-func (p *ScriptedProvider) SupportsTools() bool     { return true }
-func (p *ScriptedProvider) GetModel() string        { return "scripted" }
+// SupportsTools reports tool-calling support (scripted turns may carry
+// tool calls, so always true).
+func (p *ScriptedProvider) SupportsTools() bool { return true }
+
+// GetModel is the static model name reported for scripted turns.
+func (p *ScriptedProvider) GetModel() string { return "scripted" }
+
+// GetProviderName is the static provider name reported for scripted turns.
 func (p *ScriptedProvider) GetProviderName() string { return "scripted" }
