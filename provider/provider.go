@@ -237,6 +237,10 @@ type StreamCallback interface {
 // It also provides a simple CLI fallback implementation for AskFollowupQuestion.
 type StreamCallbackAdapter struct{}
 
+// All no-op methods below implement StreamCallback; override only the
+// events a host cares about (see the interface docs for each event's
+// contract, and cobot's examples/streaming for a worked example).
+
 func (a *StreamCallbackAdapter) OnContent(delta string)                                  {}
 func (a *StreamCallbackAdapter) OnReasoning(delta string)                                {}
 func (a *StreamCallbackAdapter) OnStreamStart()                                          {}

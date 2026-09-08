@@ -10,6 +10,7 @@ import (
 // MockProvider implements a mock provider for testing streaming and tool calls
 // It simulates OpenAI-compatible SSE streaming responses
 
+// MockScenario selects which canned conversation a MockProvider replays.
 type MockScenario string
 
 const (

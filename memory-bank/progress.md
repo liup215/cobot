@@ -164,13 +164,34 @@
       同类会话本地文件，磁盘文件保留）
 
 ### M5 文档与发布
-- [ ] examples：basic / streaming / custom-tool / guard（均可离线 go run）
-- [ ] README 中英 + godoc 清理
-- [ ] Maestro embedded 后端接入（runner 新后端与 claude/pi 并列）
-- [ ] v0.1.0 tag + `gh release create`
+- [x] examples：basic / streaming / custom-tool / guard（均可离线 go run，scripted
+      provider 回放 LLM 轮次，无需 API key；examples/basic 打印 RunResult 交付物、
+      examples/streaming 演示 RunWithCallback + StreamCallbackAdapter 的
+      OnContent/OnToolCall 事件流、examples/custom-tool 演示
+      InitDefaultRegistry().Register 注入宿主工具（即 Maestro 内置工具注入方式）、
+      examples/guard 演示 ToolGuard 三态 deny/ErrAbortRun/放行）
+- [x] README 中英双语（README.md 中文完整版 + README_EN.md 英文版：徽章与 v0.1.0
+      对齐、快速开始、Config 全字段表 19 项、嵌入指南——宿主注册工具/接管系统
+      提示词/读取 RunResult/其他挂钩、M4 工具行为定稿表对齐并补 rune 边界截断与
+      headless ask_followup 语义）+ godoc 清理（补 MockScenario/HTTPError.Error/
+      ScriptedProvider 访问器/StreamCallbackAdapter 组注释；全库无 TODO 残留）
+- [ ] Maestro embedded 后端接入（runner 新后端与 claude/pi 并列）——不在 M5 发布
+      收尾任务范围内，留待独立任务
+- [x] v0.1.0 release（2026-09-08 发布）：tag 4230e32 解引用指向 4eb4858（M0–M3
+      完成点，未移动）。release notes 定稿入库 docs/releases/v0.1.0.md（M0–M3
+      特性清单 + 已知限制，指路 v0.1.1/v0.2.0 承载 main 内容），README「版本与
+      发布」段已同步声明。`gh release create v0.1.0 --title "cobot v0.1.0 —
+      M0–M3 foundation release" --notes-file docs/releases/v0.1.0.md` 成功，
+      https://github.com/liup215/cobot/releases/tag/v0.1.0 存在且指向 4eb4858
 
 ## Current Status
 
+**M5 发布收尾完成（2026-09-08）：examples 四件套（basic/streaming/custom-tool/
+guard，scripted provider 离线 go run 全通过）+ README 中英双语（Config 全字段表 +
+嵌入指南 + M4 工具行为表对齐）+ godoc 清理 + v0.1.0 release 已全部完成并提交；
+release 已发布（https://github.com/liup215/cobot/releases/tag/v0.1.0，tag 4230e32
+指向 4eb4858 未移动，notes = M0–M3 特性 + 已知限制）。`go build/vet/gofmt` 干净，
+`go test ./...` 全绿。Maestro embedded 后端接入不在本任务范围，未勾选。**
 **M4 审查修复完成（2026-08-30）：compact.Summarize 任务消息重复（历史不以
 user 开头时首条用户消息出现两次）已修（`firstUser < cut` 守卫 + 回归测试）；
 loop 60% 挂点对注入 Strategy 的接线补了测试（变异验证有效）；execute_command
@@ -278,3 +299,4 @@ godoc 清理 + Maestro embedded 后端接入。
 | 2026-08-30 | Summarize 的任务消息回插守卫收紧为 `firstUser >= 0 && firstUser < cut`（与构造 dropped 集合的循环同边界） | 历史不以 user 开头时首条用户消息落在保留窗口起点，旧守卫会把它既留在 body[cut:] 又插到摘要前（任务消息出现两次）；Trim 的对应循环本就按该边界处理，补测试钉住 parity |
 | 2026-08-30 | 字节截断改 rune 边界安全：tools/utf8.go 的 truncateUTF8Prefix/Suffix 供 execute_command（32KB 头尾）与 read_file（64KB 整文件 / 100KB 行区间）三处使用；截断通知改报实际展示字节数 | 普通字节切割会在 64KB/100KB/32KB 边界把中文/emoji 劈成 U+FFFD 污染模型上下文；回退切割点至多让出 3 字节，字节上限语义保持 |
 | 2026-08-30 | `.git-commit-msg.txt`（Maestro 会话的提交信息临时文件）加入 .gitignore 并解除跟踪 | 上次会话把它随修复提交一并 add 进了仓库（dc88baf 中不存在）；不处理则每次提交都会带来脏 diff |
+| 2026-09-07 | v0.1.0 tag 固定在 4eb4858 不移动；release notes 按 tag 实际内容（M0–M3）书写并显式声明 M4/M5 交付物在 main、随 v0.1.1/v0.2.0 发布 | 引用方对 tag 能力预期必须与 go get 拿到的代码一致（评审意见②）；当时点 Run 尚返回 error、无 compact 包、无 examples |
