@@ -177,24 +177,21 @@
       ScriptedProvider 访问器/StreamCallbackAdapter 组注释；全库无 TODO 残留）
 - [ ] Maestro embedded 后端接入（runner 新后端与 claude/pi 并列）——不在 M5 发布
       收尾任务范围内，留待独立任务
-- [ ] v0.1.0 release：tag 已提前打在 4eb4858（M0–M3 完成点，不移动）。release notes
-      稿已定稿（/tmp/release-notes-v0.1.0.md + 任务记录流备份：M0–M3 特性清单 +
-      已知限制，指路 v0.1.1/v0.2.0 承载 main 内容），README「版本与发布」段已同步
-      声明。**唯一剩余动作** `gh release create v0.1.0 --title "cobot v0.1.0 —
-      M0–M3 foundation release" --notes-file <notes>`——2026-09-07 深夜执行时
-      外部服务（api.github.com 短暂中断 + 权限分类器 ark-code-latest 持续超时）
-      双重故障未能完成，重试 15+ 次未恢复；续跑时网络恢复后执行该命令即可收尾
-      （gh release view v0.1.0 验证后勾选本项）
+- [x] v0.1.0 release（2026-09-08 发布）：tag 4230e32 解引用指向 4eb4858（M0–M3
+      完成点，未移动）。release notes 定稿入库 docs/releases/v0.1.0.md（M0–M3
+      特性清单 + 已知限制，指路 v0.1.1/v0.2.0 承载 main 内容），README「版本与
+      发布」段已同步声明。`gh release create v0.1.0 --title "cobot v0.1.0 —
+      M0–M3 foundation release" --notes-file docs/releases/v0.1.0.md` 成功，
+      https://github.com/liup215/cobot/releases/tag/v0.1.0 存在且指向 4eb4858
 
 ## Current Status
 
-**M5 发布收尾基本完成（2026-09-07/08）：examples 四件套（basic/streaming/custom-tool/
+**M5 发布收尾完成（2026-09-08）：examples 四件套（basic/streaming/custom-tool/
 guard，scripted provider 离线 go run 全通过）+ README 中英双语（Config 全字段表 +
-嵌入指南 + M4 工具行为表对齐）+ godoc 清理 已完成并提交；唯一剩余 =
-`gh release create v0.1.0`（tag 4eb4858 不移动，notes = M0–M3 特性 + 已知限制），
-因执行当晚外部网络/权限分类器双重故障未能发出（notes 稿已备好，续跑一条命令收尾）。
-`go build/vet/gofmt` 干净，`go test ./...` 全绿。Maestro embedded 后端接入不在本任务
-范围，未勾选。**
+嵌入指南 + M4 工具行为表对齐）+ godoc 清理 + v0.1.0 release 已全部完成并提交；
+release 已发布（https://github.com/liup215/cobot/releases/tag/v0.1.0，tag 4230e32
+指向 4eb4858 未移动，notes = M0–M3 特性 + 已知限制）。`go build/vet/gofmt` 干净，
+`go test ./...` 全绿。Maestro embedded 后端接入不在本任务范围，未勾选。**
 **M4 审查修复完成（2026-08-30）：compact.Summarize 任务消息重复（历史不以
 user 开头时首条用户消息出现两次）已修（`firstUser < cut` 守卫 + 回归测试）；
 loop 60% 挂点对注入 Strategy 的接线补了测试（变异验证有效）；execute_command
