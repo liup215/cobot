@@ -35,6 +35,7 @@ var nonToolIdentifiers = map[string]bool{
 	"environment_details": true, // prose: name of the Cline-style env block
 	"file_pattern":        true, // input-schema property (search/definition tools)
 	"requires_approval":   true, // input-schema property (run)
+	"allow_multiple":      true, // input-schema property (ask_followup_question)
 	"line_number":         true, // input-schema property (read paging)
 	"tool_calls":          true, // prose: native function-calling field
 	"tool_name":           true, // XML fallback placeholder tag <tool_name>

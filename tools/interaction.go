@@ -18,16 +18,18 @@ type AskFollowupQuestionTool struct {
 
 // AskFollowupQuestionInput represents the input for ask_followup_question tool
 type AskFollowupQuestionInput struct {
-	Question string   `json:"question"`
-	Options  []string `json:"options,omitempty"`
+	Question      string   `json:"question"`
+	Options       []string `json:"options,omitempty"`
+	AllowMultiple bool     `json:"allow_multiple,omitempty"`
 }
 
 // NewAskFollowupQuestionTool creates a new ask_followup_question tool
 func NewAskFollowupQuestionTool() *AskFollowupQuestionTool {
 	return &AskFollowupQuestionTool{
 		BaseTool: BaseTool{
-			name:        "ask_followup_question",
-			description: "Ask the user a question to gather clarifying information or make a decision. Use this when you need more information to complete a task.",
+			name: "ask_followup_question",
+			description: "Ask the user a question to gather clarifying information or make a decision. Use this when you need more information to complete a task. " +
+				"Set allow_multiple when several options may be chosen; the answer then lists the picks comma-separated.",
 			inputSchema: QuestionSchema,
 		},
 	}
@@ -69,12 +71,8 @@ func (t *AskFollowupQuestionTool) Execute(ctx context.Context, input json.RawMes
 				return "", r.err
 			}
 			answer := strings.TrimSpace(r.ans)
-			// If options provided and user answered a number, map it.
-			if len(req.Options) > 0 {
-				if num, err := parseInt(answer); err == nil && num > 0 && num <= len(req.Options) {
-					answer = req.Options[num-1]
-				}
-			}
+			// Resolve numeric option picks ("2", or "1,3" with allow_multiple).
+			answer = mapOptionAnswer(req.Options, answer, req.AllowMultiple)
 			return fmt.Sprintf("User answered: %s", answer), nil
 		}
 	}
@@ -100,14 +98,40 @@ func (t *AskFollowupQuestionTool) Execute(ctx context.Context, input json.RawMes
 	}
 
 	answer = strings.TrimSpace(answer)
-
-	if len(req.Options) > 0 {
-		if num, err := parseInt(answer); err == nil && num > 0 && num <= len(req.Options) {
-			answer = req.Options[num-1]
-		}
-	}
+	answer = mapOptionAnswer(req.Options, answer, req.AllowMultiple)
 
 	return fmt.Sprintf("User answered: %s", answer), nil
+}
+
+// mapOptionAnswer resolves numeric option picks to their texts: a single
+// index ("2"), or with allow_multiple a comma-separated list ("1, 3" →
+// "first, third"). Non-numeric answers pass through unchanged.
+func mapOptionAnswer(options []string, answer string, allowMultiple bool) string {
+	if len(options) == 0 {
+		return answer
+	}
+	if !allowMultiple {
+		if n, err := parseInt(answer); err == nil && n > 0 && n <= len(options) {
+			return options[n-1]
+		}
+		return answer
+	}
+	parts := strings.Split(answer, ",")
+	mapped := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if n, err := parseInt(p); err == nil && n > 0 && n <= len(options) {
+			p = options[n-1]
+		}
+		mapped = append(mapped, p)
+	}
+	if len(mapped) == 0 {
+		return answer
+	}
+	return strings.Join(mapped, ", ")
 }
 
 // parseInt parses a string to int

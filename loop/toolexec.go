@@ -2,8 +2,10 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
+	"github.com/liup215/cobot/provider"
 	"github.com/liup215/cobot/tools"
 	"github.com/liup215/cobot/types"
 )
@@ -114,8 +116,22 @@ func (a *BaseAgent) executeToolCalls(ctx context.Context, lastMsg types.Message,
 
 		// If this is the ask_followup_question tool and the callback supports AskFollowupQuestion,
 		// inject the TUI/Callback handler so the tool doesn't read directly from stdin.
+		// allow_multiple rides along: callbacks implementing MultiAskCallback get
+		// the flag (multi-select UIs); everyone else keeps the plain flow and the
+		// flag is dropped.
 		if askTool, ok := tool.(*tools.AskFollowupQuestionTool); ok {
+			allowMultiple := false
+			var askInput struct {
+				AllowMultiple bool `json:"allow_multiple"`
+			}
+			if err := json.Unmarshal(tc.Input, &askInput); err == nil {
+				allowMultiple = askInput.AllowMultiple
+			}
+			multi, supportsMulti := callback.(provider.MultiAskCallback)
 			askTool.SetHandler(func(question string, options []string) (string, error) {
+				if supportsMulti {
+					return multi.AskFollowupQuestionMulti(question, options, allowMultiple)
+				}
 				return callback.AskFollowupQuestion(question, options)
 			})
 		}

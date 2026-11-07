@@ -197,7 +197,7 @@ behavior below is pinned by tests (`tools/behavior_test.go`):
 | `ls` | Entries sorted by filename (`os.ReadDir` semantics, pinned); truncated past 500 entries with a notice |
 | `glob` | Recursive filename glob; **fd fast path** when `fd` is installed (parallel + .gitignore-aware), falling back to a pure-Go walk; returns up to 500 paths |
 | `attempt_completion` | Terminal tool: `result` required, optional `command` (a command for the user to verify the result) |
-| `ask_followup_question` | Clarification question, does not end the run; `SetHandler` injects the interaction side (TUI/host), falling back to stdin; answers may be given by option index; in headless use a handler error is fed back to the model as text and the run continues |
+| `ask_followup_question` | Clarification question, does not end the run; `SetHandler` injects the interaction side (TUI/host), falling back to stdin; answers may be given by option index; `allow_multiple` declares a multi-select (hosts implementing `provider.MultiAskCallback` receive the flag, index `1,3` maps to `a, c` item by item); in headless use a handler error is fed back to the model as text and the run continues |
 | `plan_mode_respond` | Plan-mode terminal tool: the response is echoed back verbatim |
 
 File/command tools deliberately do **no working-directory sandboxing** (gline

@@ -199,6 +199,10 @@ var (
 					"type": "string"
 				},
 				"description": "Optional list of options for the user to choose from"
+			},
+			"allow_multiple": {
+				"type": "boolean",
+				"description": "Set true when the user may pick SEVERAL options; the UI then shows a multi-select and the answer lists the picks comma-separated (e.g. \"fast, cheap\"). Leave unset for single-choice questions."
 			}
 		},
 		"required": ["question"]

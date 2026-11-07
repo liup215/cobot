@@ -801,3 +801,63 @@ func TestAgentNameInSystemPrompt(t *testing.T) {
 		})
 	}
 }
+
+// allow_multiple reaches a callback that implements MultiAskCallback; the
+// two-parameter flow stays untouched for everyone else (covered by
+// TestAskFollowupDoesNotTerminate with recordingCallback).
+func TestAskFollowupAllowMultipleRouting(t *testing.T) {
+	prov := provider.NewScriptedProvider(
+		provider.TurnScript{ToolCalls: []provider.ToolCall{{
+			ID:    "c1",
+			Name:  types.ToolAskFollowupQuestion.String(),
+			Input: `{"question":"pick","options":["a","b"],"allow_multiple":true}`,
+		}}},
+		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c2", "done")}},
+	)
+	reg := tools.NewRegistry()
+	if err := reg.Register(&tools.ToolInfo{
+		Tool:         tools.NewAskFollowupQuestionTool(),
+		AllowedModes: []string{"plan", "act"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(&tools.ToolInfo{
+		Tool:         tools.NewAttemptCompletionTool(),
+		AllowedModes: []string{"plan", "act"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := New(Options{Provider: prov, ToolRegistry: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := &multiRecordingCallback{recordingCallback: &recordingCallback{}}
+	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !cb.gotMulti {
+		t.Error("allow_multiple=true never reached the MultiAskCallback")
+	}
+	if cb.gotQuestion != "pick" {
+		t.Errorf("question = %q, want %q", cb.gotQuestion, "pick")
+	}
+	if cb.multiAnswer != "a, b" {
+		t.Errorf("answer from multi callback not returned: %q", cb.multiAnswer)
+	}
+}
+
+// multiRecordingCallback embeds the plain recording callback (satisfying
+// StreamCallback) and opts into the multi-select extension.
+type multiRecordingCallback struct {
+	*recordingCallback
+	gotMulti    bool
+	gotQuestion string
+	multiAnswer string
+}
+
+func (c *multiRecordingCallback) AskFollowupQuestionMulti(q string, o []string, multi bool) (string, error) {
+	c.gotMulti = multi
+	c.gotQuestion = q
+	c.multiAnswer = "a, b"
+	return c.multiAnswer, nil
+}

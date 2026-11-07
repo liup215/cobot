@@ -235,6 +235,15 @@ type StreamCallback interface {
 
 // StreamCallbackAdapter is a no-op adapter for non-streaming scenarios.
 // It also provides a simple CLI fallback implementation for AskFollowupQuestion.
+// MultiAskCallback is an OPTIONAL extension of StreamCallback for hosts whose
+// UI can present multi-select questions (ask_followup_question with
+// allow_multiple). The loop type-asserts the callback: hosts implementing it
+// receive every follow-up through AskFollowupQuestionMulti (flag included);
+// hosts that do not keep the plain two-parameter flow and the flag is dropped.
+type MultiAskCallback interface {
+	AskFollowupQuestionMulti(question string, options []string, allowMultiple bool) (string, error)
+}
+
 type StreamCallbackAdapter struct{}
 
 // All no-op methods below implement StreamCallback; override only the
@@ -257,6 +266,14 @@ func (a *StreamCallbackAdapter) OnTaskCreated(taskID string)                    
 // AskFollowupQuestion provides a CLI fallback when no UI callback is available.
 // It prints the question and options to stdout and reads from stdin.
 func (a *StreamCallbackAdapter) AskFollowupQuestion(question string, options []string) (string, error) {
+	return a.AskFollowupQuestionMulti(question, options, false)
+}
+
+// AskFollowupQuestionMulti is the CLI fallback for allow_multiple questions:
+// several picks may be typed as comma-separated numbers and each numeric
+// token maps to its option text. Hosts with a real UI implement this on their
+// callback instead (see MultiAskCallback).
+func (a *StreamCallbackAdapter) AskFollowupQuestionMulti(question string, options []string, allowMultiple bool) (string, error) {
 	// Print question
 	fmt.Println()
 	fmt.Println("❓", question)
@@ -264,7 +281,11 @@ func (a *StreamCallbackAdapter) AskFollowupQuestion(question string, options []s
 
 	// Print options if provided
 	if len(options) > 0 {
-		fmt.Println("Options:")
+		if allowMultiple {
+			fmt.Println("Options (choose one or more, comma-separated numbers):")
+		} else {
+			fmt.Println("Options:")
+		}
 		for i, opt := range options {
 			fmt.Printf("  %d. %s\n", i+1, opt)
 		}
@@ -280,10 +301,26 @@ func (a *StreamCallbackAdapter) AskFollowupQuestion(question string, options []s
 	}
 	answer := strings.TrimSpace(line)
 
-	// If the user provided a numeric option, map it to the option text
+	// Map numeric picks ("2", or "1,3" with allow_multiple) to option texts.
 	if len(options) > 0 {
-		if n, err := strconv.Atoi(answer); err == nil && n > 0 && n <= len(options) {
-			return options[n-1], nil
+		if allowMultiple {
+			parts := strings.Split(answer, ",")
+			mapped := make([]string, 0, len(parts))
+			for _, p := range parts {
+				p = strings.TrimSpace(p)
+				if p == "" {
+					continue
+				}
+				if n, err := strconv.Atoi(p); err == nil && n > 0 && n <= len(options) {
+					p = options[n-1]
+				}
+				mapped = append(mapped, p)
+			}
+			if len(mapped) > 0 {
+				answer = strings.Join(mapped, ", ")
+			}
+		} else if n, err := strconv.Atoi(answer); err == nil && n > 0 && n <= len(options) {
+			answer = options[n-1]
 		}
 	}
 

@@ -169,7 +169,7 @@ agent, _ := cobot.NewAgent(cobot.Config{
 | `ls` | 目录条目按文件名排序（`os.ReadDir` 语义，已钉死）；超过 500 条截断并附通知 |
 | `glob` | 按文件名 glob 递归查找；**fd 快路径**（安装 `fd` 时：并行 + .gitignore 感知），缺失回落纯 Go walk；最多返回 500 条 |
 | `attempt_completion` | 终结工具：必填 `result`，可选 `command`（建议用户复核结果的命令） |
-| `ask_followup_question` | 澄清问题，不终结运行；`SetHandler` 注入交互端（TUI/宿主），未注入时回退 stdin；支持按选项序号作答；headless 下 handler 返回错误时错误文本回传模型、run 继续 |
+| `ask_followup_question` | 澄清问题，不终结运行；`SetHandler` 注入交互端（TUI/宿主），未注入时回退 stdin；支持按选项序号作答；`allow_multiple` 声明多选（宿主实现 `provider.MultiAskCallback` 收到标志，序号 `1,3` 逐项映射为 `a, c`）；headless 下 handler 返回错误时错误文本回传模型、run 继续 |
 | `plan_mode_respond` | Plan 模式终结工具：响应原样回显给用户 |
 
 文件/命令类工具**不做工作目录沙箱**（gline 基线语义）：路径可以指向工作目录之外，

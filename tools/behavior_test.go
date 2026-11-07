@@ -485,3 +485,37 @@ var (
 	_ = os.Getpid
 	_ = sync.Mutex{}
 )
+
+// allow_multiple: numeric picks are resolved per item ("1,3" → "a, c") and
+// single-choice keeps the old one-index mapping.
+func TestAskFollowupMultiAnswerMapping(t *testing.T) {
+	tool := NewAskFollowupQuestionTool()
+	tool.SetHandler(func(q string, o []string) (string, error) { return "1,3", nil })
+
+	input, _ := json.Marshal(map[string]any{
+		"question":       "pick several",
+		"options":        []string{"a", "b", "c"},
+		"allow_multiple": true,
+	})
+	out, err := tool.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("multi execute: %v", err)
+	}
+	if out != "User answered: a, c" {
+		t.Errorf("multi mapping = %q, want %q", out, "User answered: a, c")
+	}
+
+	// Single-choice: a comma list is NOT split (old contract preserved).
+	tool.SetHandler(func(q string, o []string) (string, error) { return "1,3", nil })
+	input, _ = json.Marshal(map[string]any{
+		"question": "pick one",
+		"options":  []string{"a", "b", "c"},
+	})
+	out, err = tool.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("single execute: %v", err)
+	}
+	if out != "User answered: 1,3" {
+		t.Errorf("single mapping = %q, want the raw answer", out)
+	}
+}
