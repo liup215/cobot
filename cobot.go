@@ -30,6 +30,7 @@ import (
 
 	"github.com/liup215/cobot/loop"
 	"github.com/liup215/cobot/provider"
+	"github.com/liup215/cobot/skills"
 	"github.com/liup215/cobot/tools"
 )
 
@@ -153,6 +154,13 @@ type Config struct {
 
 	// Title is the task title used when a new task is created.
 	Title string
+
+	// Skills is the set of Agent Skills advertised in the system prompt —
+	// name + description + SKILL.md path only; the model reads a SKILL.md
+	// on demand when a task matches its description (progressive
+	// disclosure). nil = no SKILLS section. Use skills.Discover to scan
+	// directories and agent.SetSkills to swap the set between runs.
+	Skills []skills.Skill
 }
 
 // NewAgent validates cfg and assembles a runnable Agent.
@@ -187,5 +195,6 @@ func NewAgent(cfg Config) (*Agent, error) {
 		Guard:                  cfg.Guard,
 		Store:                  cfg.Store,
 		Title:                  cfg.Title,
+		Skills:                 cfg.Skills,
 	})
 }

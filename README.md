@@ -63,6 +63,7 @@ res, err := agent.Run(ctx, "fix the login bug")
 | `Guard` | `cobot.ToolGuard` | nil | 审批门：每次工具执行前（主循环 + 预派发两条路径）咨询；见[嵌入指南](#嵌入指南) |
 | `Store` | `cobot.Store` | nil（禁用持久化） | 任务/消息/工具调用持久化钩子 |
 | `Title` | `string` | "" | 新建任务的标题 |
+| `Skills` | `[]skills.Skill` | nil（不渲染 SKILLS 段） | 渐进披露的 Agent Skills：系统提示词只广告 name/description/SKILL.md 路径，模型按需 `read` 加载全文；`skills.Discover(roots...)` 扫描目录，`agent.SetSkills` 运行间换集 |
 
 ## 嵌入指南
 
@@ -174,6 +175,43 @@ agent, _ := cobot.NewAgent(cobot.Config{
 
 文件/命令类工具**不做工作目录沙箱**（gline 基线语义）：路径可以指向工作目录之外，
 执行控制请通过 `Config.Guard`（`ToolGuard`）实现。
+
+## Skills（渐进披露的指令文件）
+
+一个 skill = 一个含 `SKILL.md` 的目录（Agent Skills 规范）：frontmatter 声明
+`name` 与 `description`，正文是某类工作的完整指令，可捆绑 `scripts/`、`references/`
+等相对路径附属文件。
+
+```text
+pdf-tools/
+├── SKILL.md
+├── scripts/extract.sh
+└── references/formats.md
+```
+
+```markdown
+---
+name: pdf-tools
+description: Extract text and tables from PDF files. Use when reading, converting, or inspecting PDFs.
+---
+
+# PDF tools
+
+Read `references/formats.md` before converting a document.
+```
+
+**加载机制**：启动/每次 run 前用 `skills.Discover(roots...)` 扫描目录，系统提示词末尾
+只渲染 `SKILLS` 段（name + description + SKILL.md 绝对路径 + “按需 read”指令）；
+任务匹配 description 时模型自行 `read` SKILL.md 并照做 —— 全文永不进初始上下文。
+
+- **宽容解析**（对齐规范）：无 description / frontmatter 畸形 / 读失败 → 跳过不报错；
+  重名保留先扫到的（roots 按传入顺序，用户目录在前即可覆盖内置）；`disable-model-invocation:
+  true` 的 skill 被发现但不广告（留给宿主的显式命令）。
+- **换集**：`agent.SetSkills(list)` 运行间原子替换（`skillsMu` 保护，与 prompt 构建无竞争）。
+- **frontmatter 子集**：`key: value` 标量（含引号）、`>`/`|` 块标量、缩进续行 —— 零第三方依赖。
+
+宿主侧示例见 LTEDU Agent Desktop：`internal/skills` 包 embed 内置 skill、物化到
+`<DataDir>/skills-builtin/`，用户 skill 放 `<DataDir>/skills/`，双根发现 user 优先。
 
 ## 设计要点（v0.1）
 

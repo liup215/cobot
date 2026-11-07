@@ -14,6 +14,7 @@ import (
 	"github.com/liup215/cobot/compact"
 	"github.com/liup215/cobot/prompts"
 	"github.com/liup215/cobot/provider"
+	"github.com/liup215/cobot/skills"
 	"github.com/liup215/cobot/tools"
 	"github.com/liup215/cobot/types"
 )
@@ -65,6 +66,10 @@ type Agent interface {
 	// GetMode returns the current operating mode
 	GetMode() Mode
 
+	// SetSkills replaces the skills advertised in the system prompt
+	// (progressive-disclosure skill list; nil clears the SKILLS section).
+	SetSkills(list []skills.Skill)
+
 	// Abort stops the current execution
 	Abort()
 
@@ -101,6 +106,12 @@ type Options struct {
 	// CustomRules is extra text appended to the system prompt.
 	// Ignored while SystemPromptOverride is set.
 	CustomRules string
+
+	// Skills is the set of Agent Skills advertised in the system prompt
+	// (name + description + SKILL.md path only — progressive disclosure:
+	// the model reads a SKILL.md on demand when a task matches). nil = no
+	// SKILLS section. Replaced atomically by SetSkills between runs.
+	Skills []skills.Skill
 
 	// SystemPromptOverride completely replaces the default system prompt when
 	// non-empty (role, sections, tool catalogue prose and CustomRules are all
@@ -167,6 +178,9 @@ type BaseAgent struct {
 	customRules            string
 	systemPromptOverride   string
 	agentName              string
+
+	skillsMu sync.RWMutex // guards skills (SetSkills vs systemPromptFor)
+	skills   []skills.Skill
 
 	guard      ToolGuard // optional approval gate for tool calls
 	store      Store     // persistent storage
@@ -258,6 +272,7 @@ func New(opts Options) (*BaseAgent, error) {
 		customRules:            opts.CustomRules,
 		systemPromptOverride:   opts.SystemPromptOverride,
 		agentName:              agentName,
+		skills:                 opts.Skills,
 		guard:                  opts.Guard,
 		store:                  opts.Store,
 		taskTitle:              opts.Title,
@@ -557,11 +572,36 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 // text replaces the default prompt entirely and the loop appends only the
 // AVAILABLE TOOLS section (prompts.ApplySystemPromptOverride) — without it
 // the model could not see the tools it is expected to call.
+//
+// In both paths the SKILLS section (when any skill is advertised) is
+// appended last: skills sit closest to the conversation so the model hits
+// the load-on-demand instruction right before the user's message.
 func (a *BaseAgent) systemPromptFor(toolDescs []prompts.ToolDescription) string {
+	var prompt string
 	if a.systemPromptOverride != "" {
-		return prompts.ApplySystemPromptOverride(a.systemPromptOverride, toolDescs)
+		prompt = prompts.ApplySystemPromptOverride(a.systemPromptOverride, toolDescs)
+	} else {
+		prompt = prompts.GetSystemPrompt(string(a.mode), toolDescs, a.customRules, a.agentName)
 	}
-	return prompts.GetSystemPrompt(string(a.mode), toolDescs, a.customRules, a.agentName)
+	return prompt + a.skillsSection()
+}
+
+// skillsSection renders the SKILLS section for the currently advertised
+// skills ("" when none), reading the list under the same lock SetSkills
+// writes so a mid-run swap can never race the prompt build.
+func (a *BaseAgent) skillsSection() string {
+	a.skillsMu.RLock()
+	defer a.skillsMu.RUnlock()
+	return skills.Section(a.skills)
+}
+
+// SetSkills replaces the advertised skill set. Safe to call between runs
+// (e.g. after re-discovering the skill directories); the new section takes
+// effect on the next system prompt build.
+func (a *BaseAgent) SetSkills(list []skills.Skill) {
+	a.skillsMu.Lock()
+	a.skills = list
+	a.skillsMu.Unlock()
 }
 
 // ResetTask clears the current task ID so the next RunWithCallback creates a new task.
