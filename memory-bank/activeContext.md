@@ -2,6 +2,7 @@
 
 ## 当前工作焦点
 
+**read 看图（P1，commit b5cc3fe 已推送）**：read 图片处理改为**内容嗅探三分类**（`classifyImage`，扩展名仅作未知二进制兜底）：① 视觉栅格 png/jpeg/webp/gif → 返回独占行 `[image: <path>]` 标记 + 说明文案（宿主 provider 转成 image_url 部件，与聊天附件同管线；>10MB 超管线上限提前给元数据而非事后 unavailable 面包屑）；② bmp/tiff/heic/ico/avif → 元数据，措辞改为「vision 只收 png/jpg/webp/gif，请要 png/jpg 副本或用 run 取元数据」（删除「用脚本处理像素」的误导话术）；③ **SVG 解禁**——嗅探为文本走文本路径，XML 源码可读；文本藏在图片扩展名下也按文本读（内容优先）。描述同步（"Vision images … returned as the image itself"），prompt-guard 双向保持绿。测试：read_image_test 6 组（4 格式签名/tiff/ico 兜底/11MB 超限/SVG/嗅探优先）+ 既有 empty&image、binary-notice 用例改到新契约；9 包全绿 + vet + gofmt。依赖面不变（无新依赖）。
 **解析层抽出 + read 合并文档提取（2026-11-07 第二轮，全量测试绿，已推送）**：用户定位修订——**cobot = agent 基础框架，含默认工具与基础能力；「零依赖」无意义（只约束自己），desktop 只留 ltedu 产品特有工具**。本轮：
 - 新公共包 **`docparse/`**：文档解析注册表从 ltedu desktop `internal/knowledge` 抽出（内容嗅探分发：PDF/RTF/ZIP→OOXML·ODF·EPUB·归档清单/OLE→legacy doc·xls·ppt/HTML/纯文本嗅探；`ErrNoTextLayer`/`LooksLikePlainText`/`NeedsExtraction`），**desktop 的 knowledge KB 导入改为调用本包**——解析层单源，谁需要谁调；测试+3 个 fixture（legacy.doc/xls、sample.rtf）随迁。
 - **read 合并文档提取**：`tools/file.go` 读文件后走 `docparse.ExtractText`——普通文本原样返回（行分页路径完全不变），文档先抽文本再按行分页（头标注 `text extracted from …`，`line_number` 作用于提取文本），无文本层→友好 `[binary file: …]` 提示（结果非错误，不重试），>64MB 提取上限；`read_local_file`（desktop 侧）本轮后删除。

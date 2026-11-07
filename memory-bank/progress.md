@@ -2,6 +2,7 @@
 
 ## What Works
 
+- [x] read 看图 P1（2026-11-07，b5cc3fe 已推送）：`classifyImage` 内容嗅探三分类——视觉栅格发 `[image: path]` 标记（宿主转视觉部件）、非视觉格式元数据（新措辞）、SVG/文本优先走文本路径；>10MB 超限前置拦截；描述更新；read_image_test 6 组，9 包测试+vet+gofmt 绿
 - [x] 解析层抽出 + read 合并文档提取（2026-11-07 二轮）：新公共包 `docparse/`（自 ltedu knowledge 迁入，KB 导入改调它）；`read` 经 docparse 抽文本后行分页（text extracted 头标注 / ErrNoTextLayer 友好提示 / 64MB 提取上限）；依赖政策修订（纯 Go 第三方 gopdf/striprtf/word-extractor/xls，零依赖表述作废——README/requirements/techContext 已改）；9 包测试绿
 - [x] 工具面与 gline 对齐（2026-11-07）：新 `shell/` 包（bash-first 解析 + 共享 Run 执行器 + 审批启发式）；
       重命名 read/write/edit/ls/grep/run + 新增 glob（fd 快路径）与 grep 的 rg 快路径；run 带
