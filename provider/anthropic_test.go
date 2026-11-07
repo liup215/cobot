@@ -578,7 +578,7 @@ func TestAnthropicCreateMessage(t *testing.T) {
 			"content":[
 				{"type":"thinking","thinking":"Check the file first.","signature":"sig-1"},
 				{"type":"text","text":"Reading"},
-				{"type":"tool_use","id":"toolu_9","name":"read_file","input":{"path":"a.txt"}}
+				{"type":"tool_use","id":"toolu_9","name":"read","input":{"path":"a.txt"}}
 			],
 			"stop_reason":"tool_use",
 			"usage":{"input_tokens":33,"output_tokens":21}
@@ -607,7 +607,7 @@ func TestAnthropicCreateMessage(t *testing.T) {
 		t.Fatalf("got %d tool calls, want 1", len(resp.ToolCalls))
 	}
 	tc := resp.ToolCalls[0]
-	if tc.ID != "toolu_9" || tc.Name != "read_file" {
+	if tc.ID != "toolu_9" || tc.Name != "read" {
 		t.Errorf("tool call id/name = %q/%q", tc.ID, tc.Name)
 	}
 	if tc.Input != `{"path":"a.txt"}` {
@@ -730,7 +730,7 @@ func TestConvertMessagesToAnthropicEdgeCases(t *testing.T) {
 		{Role: types.RoleUser, Content: "   "},   // dropped: empty content
 		{Role: types.RoleAssistant, Content: ""}, // empty assistant turn
 		{Role: types.RoleAssistant, Content: "with tools",
-			ToolCalls: []types.ToolCall{{ID: "toolu_1", Name: "read_file", Input: []byte(`{"path":"a.txt"}`)}}},
+			ToolCalls: []types.ToolCall{{ID: "toolu_1", Name: "read", Input: []byte(`{"path":"a.txt"}`)}}},
 		{Role: types.RoleTool, ToolCallID: "toolu_1", Content: "contents"},
 		{Role: types.RoleTool, ToolCallID: "toolu_1", Content: ""}, // empty result
 	})
@@ -755,7 +755,7 @@ func TestConvertMessagesToAnthropicEdgeCases(t *testing.T) {
 		t.Fatalf("messages[1] content = %+v, want text + tool_use", withTools.Content)
 	}
 	got := withTools.Content[1]
-	if got.ID != "toolu_1" || got.Name != "read_file" || string(got.Input) != `{"path":"a.txt"}` {
+	if got.ID != "toolu_1" || got.Name != "read" || string(got.Input) != `{"path":"a.txt"}` {
 		t.Errorf("tool_use block = %+v", got)
 	}
 

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -121,66 +120,24 @@ func TestTruncateUTF8Suffix(t *testing.T) {
 	}
 }
 
-// ─── execute_command output ──────────────────────────────────────────────────
+// ─── read (byte-cap rune safety) ─────────────────────────────────────────────
 
-// TestTruncateCommandOutputKeepsRuneBoundaries pins that the 32KB output cap
-// never splits a multi-byte character at either cut: Chinese output must stay
-// readable instead of degrading into U+FFFD at the truncation edges.
-func TestTruncateCommandOutputKeepsRuneBoundaries(t *testing.T) {
-	long := "ab" + strings.Repeat("汉", 20000) + "MIDDLE-MARKER" + strings.Repeat("z", 40*1024)
-	got := truncateCommandOutput(long)
-
-	if len(got) > MaxCommandOutputBytes {
-		t.Errorf("truncated output too long: %d bytes", len(got))
-	}
-	if !utf8.ValidString(got) {
-		t.Error("truncated output is not valid UTF-8")
-	}
-	if strings.ContainsRune(got, utf8.RuneError) {
-		t.Error("truncated output contains U+FFFD — a rune was split at a truncation boundary")
-	}
-	if !strings.HasPrefix(got, "ab汉") {
-		t.Error("the head of the output must be kept")
-	}
-	if !strings.HasSuffix(got, "zzz") {
-		t.Error("the tail of the output must be kept")
-	}
-	if strings.Contains(got, "MIDDLE-MARKER") {
-		t.Error("the middle of the output should be dropped")
-	}
-	if !strings.Contains(got, "[... output truncated ...]") {
-		t.Error("truncation marker missing")
-	}
-}
-
-// ─── read_file ───────────────────────────────────────────────────────────────
-
-// runReadFile reads a temp file through the read_file tool.
-func runReadFile(t *testing.T, content string, startLine, endLine int) string {
+// runRead reads a temp file through the read tool (line_number/limit page).
+func runRead(t *testing.T, content string, lineNumber, limit int) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "big.txt")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	input, err := json.Marshal(ReadFileInput{Path: path, StartLine: startLine, EndLine: endLine})
+	input, err := json.Marshal(ReadFileInput{Path: path, LineNumber: lineNumber, Limit: limit})
 	if err != nil {
 		t.Fatalf("marshal input: %v", err)
 	}
 	out, err := NewReadFileTool().Execute(context.Background(), input)
 	if err != nil {
-		t.Fatalf("read_file: %v", err)
+		t.Fatalf("read: %v", err)
 	}
 	return out
-}
-
-// noticeHead splits a truncated result into the shown content and its notice.
-func noticeHead(t *testing.T, result, notice string) string {
-	t.Helper()
-	idx := strings.Index(result, notice)
-	if idx < 0 {
-		t.Fatalf("truncation notice %q missing from result", notice)
-	}
-	return result[:idx]
 }
 
 // assertValidUTF8 fails the test when s is not valid UTF-8 or contains U+FFFD.
@@ -194,47 +151,34 @@ func assertValidUTF8(t *testing.T, label, s string) {
 	}
 }
 
-// TestReadFileWholeFileTruncationKeepsRuneBoundaries pins the 64KB whole-file
-// cap: the cut lands inside a multi-byte rune in this fixture, and the result
-// must back off to the rune boundary instead of emitting U+FFFD.
-func TestReadFileWholeFileTruncationKeepsRuneBoundaries(t *testing.T) {
-	// One byte of ASCII before the cap, then Chinese: the naive byte cut at
-	// MaxReadFileBytes would keep 2 of the 3 bytes of the rune at the edge.
-	content := strings.Repeat("a", MaxReadFileBytes-1) + strings.Repeat("汉", 5000)
-	result := runReadFile(t, content, 0, 0)
+// TestReadFileByteCapKeepsRuneBoundaries pins the 50KB byte cap on a single
+// oversized line (no newline to cut at): the cut must back off to a valid
+// UTF-8 boundary instead of emitting U+FFFD into the model's context.
+func TestReadFileByteCapKeepsRuneBoundaries(t *testing.T) {
+	// One byte of ASCII before the cap, then Chinese: a naive byte cut at
+	// readFileMaxBytes would keep 2 of the 3 bytes of the rune at the edge.
+	content := strings.Repeat("a", readFileMaxBytes-1) + strings.Repeat("汉", 5000)
+	result := runRead(t, content, 0, 0)
 
-	head := noticeHead(t, result, "\n\n[File truncated:")
-	if len(head) > MaxReadFileBytes {
-		t.Errorf("shown content is %d bytes, cap is %d", len(head), MaxReadFileBytes)
+	idx := strings.Index(result, "[Chunk truncated:")
+	if idx < 0 {
+		t.Fatalf("chunk truncation notice missing: %.200s", result)
+	}
+	head := result[:idx]
+	// Strip the "[Lines x-y of …]\n" prefix line and the trailing blank
+	// line to get the shown content itself.
+	if nl := strings.IndexByte(head, '\n'); nl >= 0 {
+		head = head[nl+1:]
+	}
+	head = strings.TrimRight(head, "\n")
+	if len(head) > readFileMaxBytes {
+		t.Errorf("shown content is %d bytes, cap is %d", len(head), readFileMaxBytes)
 	}
 	assertValidUTF8(t, "shown content", head)
-	// The notice reports the bytes actually shown, not the nominal cap.
-	if !strings.Contains(result, "showing the first "+strconv.Itoa(len(head))+" bytes") {
-		t.Errorf("notice does not report the actual shown size (%d): %.200s", len(head), result)
-	}
 	if !strings.HasPrefix(head, strings.Repeat("a", 100)) {
 		t.Error("the head of the file must be kept")
 	}
-}
-
-// TestReadFileRangeTruncationKeepsRuneBoundaries pins the 100KB line-range cap
-// the same way.
-func TestReadFileRangeTruncationKeepsRuneBoundaries(t *testing.T) {
-	// Two bytes before the cap so the naive cut at MaxReadRangeBytes lands in
-	// the middle of a rune.
-	content := strings.Repeat("a", MaxReadRangeBytes-2) +
-		strings.Repeat("中文内容\n", 200)
-	result := runReadFile(t, content, 1, 0)
-
-	head := noticeHead(t, result, "\n\n[Range truncated:")
-	if len(head) > MaxReadRangeBytes {
-		t.Errorf("shown range is %d bytes, cap is %d", len(head), MaxReadRangeBytes)
-	}
-	assertValidUTF8(t, "shown range", head)
-	if !strings.Contains(result, "showing first "+strconv.Itoa(len(head))+" bytes") {
-		t.Errorf("notice does not report the actual shown size (%d): %.200s", len(head), result)
-	}
-	if !strings.HasSuffix(head, "a") {
-		t.Errorf("the cut did not back off to the rune boundary cleanly: tail=%q", head[max(0, len(head)-8):])
+	if !strings.Contains(result, "Continue with line_number=") {
+		t.Errorf("notice must tell the model how to continue: %.300s", result)
 	}
 }

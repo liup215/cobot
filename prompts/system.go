@@ -124,17 +124,17 @@ Use native tool_calls when available. If native calls are not supported, use XML
 </tool_name>
 
 Example:
-<read_file>
+<read>
 <path>src/main.go</path>
-</read_file>`
+</read>`
 }
 
 // getEditingFilesSection returns the editing files section (concise).
 func getEditingFilesSection() string {
 	return `EDITING FILES
 
-- write_to_file: create new files or overwrite existing ones completely.
-- replace_in_file: make targeted edits using exact search/replace.
+- write: create new files or overwrite existing ones completely.
+- edit: make targeted edits using exact search/replace.
 
 Usage styles:
   • Single block:  path + search + replace (one change)
@@ -159,12 +159,12 @@ func getActVsPlanSection(mode string) string {
 func getCapabilitiesSection() string {
 	return `CAPABILITIES
 
-- You have access to tools that let you execute CLI commands on the user's computer, list files, view source code definitions, regex search, read and edit files, and ask follow-up questions. These tools help you effectively accomplish a wide range of tasks, such as writing code, making edits or improvements to existing files, understanding the current state of a project, performing system operations, and much more.
-- When you initially gives you a task, a recursive list of all filepaths in the current working directory ('` + getCWD() + `') will be included in environment_details. This provides an overview of the project's file structure, offering key insights into the project from directory/file names (how developers conceptualize and organize their code) and file extensions (the language used). This can also guide decision-making on which files to explore further. If you need to further explore directories such as outside the current working directory, you can use the list_files tool. If you pass 'true' for the recursive parameter, it will list files recursively. Otherwise, it will list files at the top level, which is better suited for generic directories where you don't necessarily need the nested structure, like the Desktop.
-- You can use search_files to perform regex searches across files in a specified directory, outputting context-rich results that include surrounding lines. This is particularly useful for understanding code patterns, finding specific implementations, or identifying areas that need refactoring.
-- You can use the list_code_definition_names tool to get an overview of source code definitions for all files at the top level of a specified directory. This can be particularly useful when you need to understand the broader context and relationships between certain parts of the code. You may need to call this tool multiple times to understand various parts of the codebase related to the task.
-    - For example, when asked to make edits or improvements you might analyze the file structure in the initial environment_details to get an overview of the project, then use list_code_definition_names to get further insight using source code definitions for files located in relevant directories, then read_file to examine the contents of relevant files, analyze the code and suggest improvements or make necessary edits, then use the replace_in_file tool to implement changes. If you refactored code that could affect other parts of the codebase, you could use search_files to ensure you update other files as needed.
-- You can use the execute_command tool to run commands on the user's computer whenever you feel it can help accomplish the user's task. When you need to execute a CLI command, you must provide a clear explanation of what the command does. Prefer to execute complex CLI commands over creating executable scripts, since they are more flexible and easier to run. Prefer non-interactive commands when possible: use flags to disable pagers (e.g., '--no-pager'), auto-confirm prompts (e.g., '-y' when safe), provide input via flags/arguments rather than stdin, suppress interactive behavior, etc. For commands that may fail, consider redirecting stderr to stdout (e.g., 'command 2>&1') so you can see error messages in the output. For long-running commands, the user may keep them running in the background and you will be kept updated on their status along the way. Each command you execute is run in a new terminal instance.`
+- You have access to tools that let you execute CLI commands on the user's computer, list files, find files by name, regex search, read and edit files, and ask follow-up questions. These tools help you effectively accomplish a wide range of tasks, such as writing code, making edits or improvements to existing files, understanding the current state of a project, performing system operations, and much more.
+- When you initially gives you a task, a recursive list of all filepaths in the current working directory ('` + getCWD() + `') will be included in environment_details. This provides an overview of the project's file structure, offering key insights into the project from directory/file names (how developers conceptualize and organize their code) and file extensions (the language used). This can also guide decision-making on which files to explore further. If you need to further explore directories such as outside the current working directory, you can use the ls tool for a top-level listing of one directory, or glob to find files by name below it.
+- You can use grep to perform regex searches across files in a specified directory, outputting context-rich results that include surrounding lines. This is particularly useful for understanding code patterns, finding specific implementations, or identifying areas that need refactoring. It is powered by ripgrep when installed.
+- You can use glob to find files by name pattern anywhere below a directory (e.g. '*.go', '*config*'), respecting .gitignore. Use it when you know the file name but not its path.
+    - For example, when asked to make edits or improvements you might start from the file structure in the initial environment_details, use glob or grep to locate the relevant files, then read to examine their contents, analyze the code and suggest improvements or make necessary edits, then use the edit tool to implement changes. If you refactored code that could affect other parts of the codebase, you could use grep to ensure you update other files as needed.
+- You can use the run tool to run commands on the user's computer whenever you feel it can help accomplish the user's task. When you need to execute a CLI command, you must provide a clear explanation of what the command does. Prefer to execute complex CLI commands over creating executable scripts, since they are more flexible and easier to run. Prefer non-interactive commands when possible: use flags to disable pagers (e.g., '--no-pager'), auto-confirm prompts (e.g., '-y' when safe), provide input via flags/arguments rather than stdin, suppress interactive behavior, etc. For commands that may fail, consider redirecting stderr to stdout (e.g., 'command 2>&1') so you can see error messages in the output. For long-running commands, the user may keep them running in the background and you will be kept updated on their status along the way. Each command you execute is run in a new terminal instance.`
 }
 
 // getRulesSection returns the rules section.

@@ -5,7 +5,7 @@ import (
 )
 
 func TestParseXMLToolCalls(t *testing.T) {
-	toolNames := []string{"read_file", "execute_command", "write_file"}
+	toolNames := []string{"read", "run", "write"}
 
 	tests := []struct {
 		name     string
@@ -17,24 +17,24 @@ func TestParseXMLToolCalls(t *testing.T) {
 	}{
 		{
 			name:    "single tool call",
-			content: "Let me read the file for you.\n<read_file><path>/some/path.txt</path></read_file>",
+			content: "Let me read the file for you.\n<read><path>/some/path.txt</path></read>",
 			expected: []struct {
 				toolName   string
 				shouldHave string
 			}{{
-				toolName:   "read_file",
+				toolName:   "read",
 				shouldHave: `"path":"/some/path.txt"`,
 			}},
 		},
 		{
 			name:    "multiple tool calls",
-			content: "<read_file><path>/a.txt</path></read_file>\n<execute_command><command>ls -la</command></execute_command>",
+			content: "<read><path>/a.txt</path></read>\n<run><command>ls -la</command></run>",
 			expected: []struct {
 				toolName   string
 				shouldHave string
 			}{
-				{toolName: "read_file", shouldHave: `"path":"/a.txt"`},
-				{toolName: "execute_command", shouldHave: `"command":"ls -la"`},
+				{toolName: "read", shouldHave: `"path":"/a.txt"`},
+				{toolName: "run", shouldHave: `"command":"ls -la"`},
 			},
 		},
 		{
@@ -44,12 +44,12 @@ func TestParseXMLToolCalls(t *testing.T) {
 		},
 		{
 			name:    "whitespace inside tags",
-			content: "<write_file>\n<path>/test.txt</path>\n<content>hello world</content>\n</write_file>",
+			content: "<write>\n<path>/test.txt</path>\n<content>hello world</content>\n</write>",
 			expected: []struct {
 				toolName   string
 				shouldHave string
 			}{{
-				toolName:   "write_file",
+				toolName:   "write",
 				shouldHave: `"content":"hello world"`,
 			}},
 		},

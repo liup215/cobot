@@ -28,17 +28,17 @@ type ToolName string
 
 const (
 	// ToolReadFile reads the contents of a file.
-	ToolReadFile ToolName = "read_file"
+	ToolReadFile ToolName = "read"
 	// ToolWriteToFile writes content to a file (side effect).
-	ToolWriteToFile ToolName = "write_to_file"
+	ToolWriteToFile ToolName = "write"
 	// ToolReplaceInFile replaces content in a file via search/replace blocks (side effect).
-	ToolReplaceInFile ToolName = "replace_in_file"
+	ToolReplaceInFile ToolName = "edit"
 	// ToolExecuteCommand executes a CLI command (side effect).
-	ToolExecuteCommand ToolName = "execute_command"
+	ToolExecuteCommand ToolName = "run"
 	// ToolSearchFiles searches a regex pattern across files.
-	ToolSearchFiles ToolName = "search_files"
+	ToolSearchFiles ToolName = "grep"
 	// ToolListFiles lists files and directories.
-	ToolListFiles ToolName = "list_files"
+	ToolListFiles ToolName = "ls"
 	// ToolListCodeDefinitionNames lists code definitions (functions, classes)
 	// in a directory (read-only structure overview).
 	ToolListCodeDefinitionNames ToolName = "list_code_definition_names"

@@ -161,13 +161,13 @@ agent, _ := cobot.NewAgent(cobot.Config{
 
 | 工具 | 行为定稿 |
 |---|---|
-| `read_file` | 整文件读上限 64KB（`MaxReadFileBytes`）、`start_line/end_line` 区间读上限 100KB；超出返回头部 + 截断通知（含真实字节数/行数与指路），不再直接拒绝；截断在 rune 边界（中文/emoji 不产生 U+FFFD） |
-| `write_to_file` | 原子写：同目录临时文件 + `rename`，保留原文件 mode；写失败不破坏原文件。自动创建目录 |
-| `replace_in_file` | 所有块先在内存中应用，任一 `search` 失配 → 整文件不动并点名失败块（all-or-nothing）；结果同样原子写回 |
-| `execute_command` | 前台阻塞执行，默认超时 120s（`timeout` 可按调用覆盖）；超时杀整个进程树（Windows `taskkill /F /T` + `WaitDelay` 兜底）；stdout/stderr 分离采集，各截断 32KB（保头 3/4 + 尾 1/4 + 标记，rune 边界安全）；shell 钉死：Windows `cmd /C`，其余 `sh -c`。非 0 退出码是结果不是错误。不用于长驻服务 |
-| `search_files` | 结果确定性排序（path → line → column，稳定排序）；`TotalMatches` 报告真实命中数；结果超过 500 条时截断并附 `[Results truncated: …]` 通知 |
-| `list_files` | 目录条目按文件名排序（`os.ReadDir` 语义，已钉死）；超过 500 条截断并附通知 |
-| `list_code_definition_names` | 按文件路径排序、文件内按行号稳定排序（输出可复现）；超过 500 条截断并附通知 |
+| `read` | 按行分页读取：默认 1000 行、`limit` 上限 2000 行、块字节上限 50KB（超出截断并附 `[Chunk truncated … Continue with line_number=N]` 指路，rune 边界安全）；`~` 展开、相对路径绝对化；图片文件返回元数据而非二进制 |
+| `write` | 原子写：同目录临时文件 + `rename`，保留原文件 mode；写失败不破坏原文件。自动创建目录 |
+| `edit` | 所有块先在内存中应用，任一 `search` 失配 → 整文件不动并点名失败块（all-or-nothing）；结果同样原子写回 |
+| `run` | **shell 解析优先 bash**（Windows 找 Git Bash、跳过 WSL stub，找不到才 `cmd /C`，Unix `bash`→`sh`），语法提示烘进工具描述；前台阻塞，默认超时 120s（`timeout` 按调用覆盖，上限 600s）；超时杀整个进程树（Windows `taskkill /F /T` + `WaitDelay` 兜底）；stdout/stderr 分离采集，各截断 32KB（保头 3/4 + 尾 1/4 + 标记，rune 边界安全）；非 0 退出码是结果不是错误；`requires_approval` 或破坏性命令走审批钩子（`SetApprovalHandler`，fail-closed）。不用于长驻服务 |
+| `grep` | **ripgrep 快路径**（安装 `rg` 时：并行遍历、尊重 .gitignore、达到上限即杀扫描），缺失时回落纯 Go 并发遍历；结果确定性排序（path → line → column，稳定排序）；`TotalMatches` 报告真实命中数；超过 500 条截断并附 `[Results truncated: …]` 通知 |
+| `ls` | 目录条目按文件名排序（`os.ReadDir` 语义，已钉死）；超过 500 条截断并附通知 |
+| `glob` | 按文件名 glob 递归查找；**fd 快路径**（安装 `fd` 时：并行 + .gitignore 感知），缺失回落纯 Go walk；最多返回 500 条 |
 | `attempt_completion` | 终结工具：必填 `result`，可选 `command`（建议用户复核结果的命令） |
 | `ask_followup_question` | 澄清问题，不终结运行；`SetHandler` 注入交互端（TUI/宿主），未注入时回退 stdin；支持按选项序号作答；headless 下 handler 返回错误时错误文本回传模型、run 继续 |
 | `plan_mode_respond` | Plan 模式终结工具：响应原样回显给用户 |

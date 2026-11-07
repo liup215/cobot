@@ -35,8 +35,8 @@ func TestSearchFiles(t *testing.T) {
 	}
 
 	// Test 1: literal search for "func".
-	tool := NewSearchFilesTool()
-	input, _ := json.Marshal(SearchFilesInput{
+	tool := NewGrepTool()
+	input, _ := json.Marshal(GrepInput{
 		Path:  tmpDir,
 		Regex: "func",
 	})
@@ -55,7 +55,7 @@ func TestSearchFiles(t *testing.T) {
 	}
 
 	// Test 2: regex search with metacharacter.
-	input2, _ := json.Marshal(SearchFilesInput{
+	input2, _ := json.Marshal(GrepInput{
 		Path:  tmpDir,
 		Regex: `func \w+`,
 	})
@@ -68,7 +68,7 @@ func TestSearchFiles(t *testing.T) {
 	}
 
 	// Test 3: file pattern filter.
-	input3, _ := json.Marshal(SearchFilesInput{
+	input3, _ := json.Marshal(GrepInput{
 		Path:        tmpDir,
 		Regex:       "func",
 		FilePattern: "*.go",
@@ -107,73 +107,6 @@ func TestIsLiteralPattern(t *testing.T) {
 		if got != tc.expected {
 			t.Errorf("isLiteralPattern(%q) = %v, want %v", tc.input, got, tc.expected)
 		}
-	}
-}
-
-// TestListCodeDefinitionNames covers the list_code_definition_names tool that
-// the system prompt advertises and InitDefaultRegistry registers.
-func TestListCodeDefinitionNames(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte(
-		"package main\n\nfunc main() {}\n\nfunc helper() {}\n\ntype Server struct {}\n\ntype Store interface {}\n",
-	), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "svc.py"), []byte(
-		"class Client:\n    pass\n\ndef run():\n    pass\n",
-	), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "notes.txt"), []byte("plain text, no defs\n"), 0644)
-
-	tool := NewListCodeDefinitionNamesTool()
-
-	// 1. Go definitions are detected (functions, structs, interfaces).
-	input, _ := json.Marshal(ListCodeDefinitionNamesInput{Path: tmpDir, FilePattern: "*.go"})
-	output, err := tool.Execute(context.Background(), input)
-	if err != nil {
-		t.Fatalf("execute failed: %v", err)
-	}
-	for _, want := range []string{"main", "helper", "Server", "struct", "Store", "interface", "a.go"} {
-		if !strings.Contains(output, want) {
-			t.Errorf("output missing %q, got:\n%s", want, output)
-		}
-	}
-
-	// 2. file_pattern restricts the analysis to matching files.
-	pyInput, _ := json.Marshal(ListCodeDefinitionNamesInput{Path: tmpDir, FilePattern: "*.py"})
-	pyOutput, err := tool.Execute(context.Background(), pyInput)
-	if err != nil {
-		t.Fatalf("execute with pattern failed: %v", err)
-	}
-	if !strings.Contains(pyOutput, "Client") || !strings.Contains(pyOutput, "run") {
-		t.Errorf("python defs missing, got:\n%s", pyOutput)
-	}
-	if strings.Contains(pyOutput, "a.go") {
-		t.Errorf("pattern filter should exclude a.go, got:\n%s", pyOutput)
-	}
-
-	// 3. Results are cached for the TTL: mutating a file right after the first
-	// call must not change the second (same key) result.
-	os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("package main\n\nfunc brandNew() {}\n"), 0644)
-	cached, err := tool.Execute(context.Background(), input)
-	if err != nil {
-		t.Fatalf("cached execute failed: %v", err)
-	}
-	if !strings.Contains(cached, "helper") || strings.Contains(cached, "brandNew") {
-		t.Errorf("expected cached pre-mutation results, got:\n%s", cached)
-	}
-
-	// 4. A path outside the tree yields no error and an empty report.
-	missing, _ := json.Marshal(ListCodeDefinitionNamesInput{Path: filepath.Join(tmpDir, "does-not-exist")})
-	output, err = tool.Execute(context.Background(), missing)
-	if err != nil {
-		t.Fatalf("missing path should not error, got: %v", err)
-	}
-	if !strings.Contains(output, "No code definitions found") {
-		t.Errorf("unexpected output for missing path: %s", output)
-	}
-
-	// 5. path is required.
-	if _, err := tool.Execute(context.Background(), json.RawMessage(`{}`)); err == nil {
-		t.Error("expected an error when path is empty")
 	}
 }
 
@@ -249,8 +182,8 @@ func BenchmarkSearchConcurrent(b *testing.B) {
 		os.WriteFile(f, []byte(content), 0644)
 	}
 
-	tool := NewSearchFilesTool()
-	input, _ := json.Marshal(SearchFilesInput{
+	tool := NewGrepTool()
+	input, _ := json.Marshal(GrepInput{
 		Path:  tmpDir,
 		Regex: "println",
 	})

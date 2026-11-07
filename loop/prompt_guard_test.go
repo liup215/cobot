@@ -21,7 +21,7 @@ import (
 // with "tool not found"). These tests fail fast when the two diverge again.
 
 // toolNameShape matches snake_case identifiers — the shape of every built-in
-// tool name ("read_file", "list_code_definition_names", ...).
+// tool name ("read", "list_code_definition_names", ...).
 var toolNameShape = regexp.MustCompile(`\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b`)
 
 // nonToolIdentifiers lists snake_case words the system prompt legitimately
@@ -34,9 +34,8 @@ var toolNameShape = regexp.MustCompile(`\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b`)
 var nonToolIdentifiers = map[string]bool{
 	"environment_details": true, // prose: name of the Cline-style env block
 	"file_pattern":        true, // input-schema property (search/definition tools)
-	"requires_approval":   true, // input-schema property (execute_command)
-	"start_line":          true, // parameter referenced by tool descriptions
-	"end_line":            true, // parameter referenced by tool descriptions
+	"requires_approval":   true, // input-schema property (run)
+	"line_number":         true, // input-schema property (read paging)
 	"tool_calls":          true, // prose: native function-calling field
 	"tool_name":           true, // XML fallback placeholder tag <tool_name>
 }

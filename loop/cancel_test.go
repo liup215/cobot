@@ -43,7 +43,7 @@ func (p *hangingStreamProvider) GetProviderName() string { return "hanging" }
 
 // blockedTool blocks inside Execute until its context is canceled. The name is
 // configurable so tests can place it on either side of the pre-dispatch split:
-// "execute_command" is pre-dispatch-ineligible (single main-loop execution),
+// "run" is pre-dispatch-ineligible (single main-loop execution),
 // any other name goes through the pre-dispatch goroutine.
 type blockedTool struct {
 	name    string
@@ -52,7 +52,7 @@ type blockedTool struct {
 
 func (b *blockedTool) Name() string {
 	if b.name == "" {
-		return "execute_command"
+		return "run"
 	}
 	return b.name
 }
@@ -134,7 +134,7 @@ func TestContextCancelDuringToolExecution(t *testing.T) {
 	prov := provider.NewScriptedProvider(
 		provider.TurnScript{ToolCalls: []provider.ToolCall{{
 			ID:    "c1",
-			Name:  "execute_command",
+			Name:  "run",
 			Input: `{"command":"sleep 100"}`,
 		}}},
 		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c2", "unreachable")}},
@@ -325,12 +325,12 @@ func unansweredToolCallIDs(msgs []types.Message) []string {
 func TestContextCancelMidBatchLeavesWellFormedConversation(t *testing.T) {
 	prov := provider.NewScriptedProvider(
 		provider.TurnScript{ToolCalls: []provider.ToolCall{
-			{ID: "c1", Name: "execute_command", Input: `{"command":"sleep 100"}`},
+			{ID: "c1", Name: "run", Input: `{"command":"sleep 100"}`},
 			echoCall("c2"),
 		}},
 	)
 	reg := tools.NewRegistry()
-	tool := &blockedTool{started: make(chan struct{})} // execute_command: main-loop path, never pre-dispatched
+	tool := &blockedTool{started: make(chan struct{})} // run: main-loop path, never pre-dispatched
 	if err := reg.Register(&tools.ToolInfo{Tool: tool, AllowedModes: []string{"act"}}); err != nil {
 		t.Fatal(err)
 	}

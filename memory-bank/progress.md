@@ -2,6 +2,11 @@
 
 ## What Works
 
+- [x] 工具面与 gline 对齐（2026-11-07）：新 `shell/` 包（bash-first 解析 + 共享 Run 执行器 + 审批启发式）；
+      重命名 read/write/edit/ls/grep/run + 新增 glob（fd 快路径）与 grep 的 rg 快路径；run 带
+      `SetApprovalHandler` 审批钩子（fail-closed）；合并时保留 cobot 独有加固（原子写/500 条截断/
+      真实 TotalMatches+截断通知/确定性 formatCodeDefinitions）；list_code_definition_names 保留实现
+      不注册（gline 修剪）+ prompt 重写；8 包 `go test` 全绿（prompt-guard 双向）+ `-race` 绿
 - [x] 三路线调研完成（pi RPC 子进程 / pi Go 移植 / gline 提取），选定 gline 提取（2026-08-28）
 - [x] 需求规格定稿：memory-bank/requirements.md（v0.1，含手术清单 §10 与里程碑 §7）
 - [x] Memory Bank 初始化（projectbrief/productContext/activeContext/systemPatterns/techContext/progress）

@@ -400,7 +400,7 @@ func TestSummarizeTranscriptContents(t *testing.T) {
 	conv := buildConv(2500, append(protectedMessages(),
 		types.Message{Role: types.RoleUser, Content: "round-1 read the file"},
 		types.Message{Role: types.RoleAssistant, Content: "reading",
-			ToolCalls: []types.ToolCall{{ID: "call-1", Name: "read_file", Input: []byte(`{"path":"a.go"}`)}},
+			ToolCalls: []types.ToolCall{{ID: "call-1", Name: "read", Input: []byte(`{"path":"a.go"}`)}},
 		},
 		types.Message{Role: types.RoleTool, ToolCallID: "call-1", Content: "package main\nfunc main() {}"},
 		types.Message{Role: types.RoleUser, Content: "round-2 go on"},
@@ -423,8 +423,8 @@ func TestSummarizeTranscriptContents(t *testing.T) {
 		"round-1 read the file",
 		"round-2 go on",
 		"[user]", "[assistant]",
-		"-> tool_call read_file(",    // tool calls are labeled
-		"[tool result of read_file]", // tool results are labeled with their tool name
+		"-> tool_call read(",    // tool calls are labeled
+		"[tool result of read]", // tool results are labeled with their tool name
 		"func main() {}",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -645,7 +645,7 @@ func TestSummarizeRestoredToolFirstHistoryDoesNotDuplicateTask(t *testing.T) {
 	conv := buildConv(2500,
 		types.Message{Role: types.RoleSystem, Content: sysContent},
 		types.Message{Role: types.RoleAssistant, Content: "reading the file",
-			ToolCalls: []types.ToolCall{{ID: "call-1", Name: "read_file", Input: []byte(`{"path":"a.go"}`)}},
+			ToolCalls: []types.ToolCall{{ID: "call-1", Name: "read", Input: []byte(`{"path":"a.go"}`)}},
 		},
 		types.Message{Role: types.RoleTool, ToolCallID: "call-1", Content: "package main\nfunc main() {}"},
 		types.Message{Role: types.RoleUser, Content: taskContent},
@@ -678,7 +678,7 @@ func TestSummarizeRestoredToolFirstHistoryDoesNotDuplicateTask(t *testing.T) {
 		t.Errorf("task message appears %d times, want exactly 1", n)
 	}
 	// The tool call and its result were summarized together, never separated.
-	for _, want := range []string{"-> tool_call read_file(", "func main() {}"} {
+	for _, want := range []string{"-> tool_call read(", "func main() {}"} {
 		if !strings.Contains(fake.prompts[0], want) {
 			t.Errorf("transcript missing %q", want)
 		}

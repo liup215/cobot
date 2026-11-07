@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,13 +133,13 @@ func (s *literalSearcher) FindAllIndex(b []byte) [][]int {
 
 func (s *literalSearcher) String() string { return string(s.pattern) }
 
-// SearchFilesTool searches for patterns in files.
-type SearchFilesTool struct {
+// GrepTool searches for patterns in files.
+type GrepTool struct {
 	BaseTool
 }
 
-// SearchFilesInput represents the input for search_files tool.
-type SearchFilesInput struct {
+// GrepInput represents the input for grep tool.
+type GrepInput struct {
 	Path        string `json:"path"`
 	Regex       string `json:"regex"`
 	FilePattern string `json:"file_pattern,omitempty"`
@@ -154,20 +155,17 @@ type SearchResult struct {
 	ContextLine int    `json:"context_line"`
 }
 
-// SearchFilesOutput represents the output of search_files tool.
+// SearchFilesOutput represents the output of grep tool.
 type SearchFilesOutput struct {
-	Results []SearchResult `json:"results"`
-	// TotalFiles is the number of files that were searched.
-	TotalFiles int `json:"total_files"`
-	// TotalMatches is the number of matches found before capping; Results may
-	// hold fewer when the cap applied.
-	TotalMatches int `json:"total_matches"`
+	Results      []SearchResult `json:"results"`
+	TotalFiles   int            `json:"total_files"`
+	TotalMatches int            `json:"total_matches"`
 	// Truncated is true when Results was capped at maxSearchResults.
 	Truncated bool `json:"truncated,omitempty"`
 }
 
-// NewSearchFilesTool creates a new search_files tool.
-func NewSearchFilesTool() *SearchFilesTool {
+// NewGrepTool creates a new grep tool.
+func NewGrepTool() *GrepTool {
 	schema := json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -187,18 +185,19 @@ func NewSearchFilesTool() *SearchFilesTool {
 		"required": ["path", "regex"]
 	}`)
 
-	return &SearchFilesTool{
+	return &GrepTool{
 		BaseTool: BaseTool{
-			name:        "search_files",
-			description: "Search for a regex pattern in files within a directory. Returns context-rich results with file paths, line numbers, and surrounding context.",
+			name: "grep",
+			description: "Search for a regex pattern in files within a directory. Returns context-rich results with file paths, line numbers, and surrounding context. Powered by ripgrep (fast, respects .gitignore) when installed. " +
+				"Prefer this over reading whole files when looking for code. To find files by NAME, use glob instead.",
 			inputSchema: schema,
 		},
 	}
 }
 
 // Execute searches for the pattern.
-func (t *SearchFilesTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
-	var req SearchFilesInput
+func (t *GrepTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
+	var req GrepInput
 	if err := ParseInput(input, &req); err != nil {
 		return "", err
 	}
@@ -220,14 +219,61 @@ func (t *SearchFilesTool) Execute(ctx context.Context, input json.RawMessage) (s
 	}
 	searchCacheMu.RUnlock()
 
+	// Fast path: ripgrep when installed — parallel traversal, SIMD matching
+	// and .gitignore awareness make it orders of magnitude faster than the
+	// pure-Go walk on large repositories. Falls back when rg is missing or
+	// fails to run; cancellation is propagated instead.
+	if out, ok, err := searchFilesRipgrep(ctx, path, req.Regex, req.FilePattern); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", err
+		}
+		// rg broken: fall through to the pure-Go implementation.
+	} else if ok {
+		// Cap results without falsifying the total: Truncated + the format
+		// notice tell the model how much was dropped (kept from cobot during
+		// the gline alignment).
+		if len(out.Results) > maxSearchResults {
+			out.Results = out.Results[:maxSearchResults]
+			out.Truncated = true
+		}
+		if out.TotalMatches < len(out.Results) {
+			out.TotalMatches = len(out.Results)
+		}
+		storeSearchCache(cacheKey, out)
+		return formatSearchResults(out), nil
+	}
+
+	output, err := searchFilesGo(ctx, path, req.Regex, req.FilePattern)
+	if err != nil {
+		return "", err
+	}
+
+	// Store in cache.
+	storeSearchCache(cacheKey, output)
+
+	// Format output.
+	return formatSearchResults(output), nil
+}
+
+// storeSearchCache caches a search output under the given key.
+func storeSearchCache(key searchCacheKey, output *SearchFilesOutput) {
+	searchCacheMu.Lock()
+	clearExpiredSearchCache()
+	searchCache[key] = &searchCacheEntry{output: output, createdAt: time.Now()}
+	searchCacheMu.Unlock()
+}
+
+// searchFilesGo is the pure-Go fallback: walk the tree, read candidate files
+// and match with Go's regexp/bytes search using a worker pool.
+func searchFilesGo(ctx context.Context, path, regex, filePattern string) (*SearchFilesOutput, error) {
 	// Build appropriate searcher (literal fast path when possible).
 	var srh searcher
-	if isLiteralPattern(req.Regex) {
-		srh = &literalSearcher{pattern: []byte(req.Regex)}
+	if isLiteralPattern(regex) {
+		srh = &literalSearcher{pattern: []byte(regex)}
 	} else {
-		re, err := regexp.Compile(req.Regex)
+		re, err := regexp.Compile(regex)
 		if err != nil {
-			return "", fmt.Errorf("invalid regex pattern: %w", err)
+			return nil, fmt.Errorf("invalid regex pattern: %w", err)
 		}
 		srh = &regexSearcher{re: re}
 	}
@@ -236,9 +282,9 @@ func (t *SearchFilesTool) Execute(ctx context.Context, input json.RawMessage) (s
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("path not found: %s", path)
+			return nil, fmt.Errorf("path not found: %s", path)
 		}
-		return "", fmt.Errorf("failed to stat path: %w", err)
+		return nil, fmt.Errorf("failed to stat path: %w", err)
 	}
 
 	// If path is a file, search just that file.
@@ -246,30 +292,22 @@ func (t *SearchFilesTool) Execute(ctx context.Context, input json.RawMessage) (s
 	if !info.IsDir() {
 		files = []string{path}
 	} else {
-		files, err = findFiles(path, req.FilePattern)
+		files, err = findFiles(path, filePattern)
 		if err != nil {
-			return "", fmt.Errorf("failed to find files: %w", err)
+			return nil, fmt.Errorf("failed to find files: %w", err)
 		}
 	}
 
 	// Search in files concurrently.
 	output := searchFilesConcurrent(ctx, files, srh)
 
-	// Cap the returned results but keep the true match count so the model can
-	// tell that the list was cut short.
-	output.Truncated = len(output.Results) > maxSearchResults
-	if output.Truncated {
+	// Cap results to avoid huge payloads; TotalMatches keeps the TRUE count
+	// so the truncation notice can say how much was dropped.
+	if len(output.Results) > maxSearchResults {
+		output.Truncated = true
 		output.Results = output.Results[:maxSearchResults]
 	}
-
-	// Store in cache.
-	searchCacheMu.Lock()
-	clearExpiredSearchCache()
-	searchCache[cacheKey] = &searchCacheEntry{output: output, createdAt: time.Now()}
-	searchCacheMu.Unlock()
-
-	// Format output.
-	return formatSearchResults(output), nil
+	return output, nil
 }
 
 // isLiteralPattern returns true if the pattern contains no regex metacharacters.
@@ -346,19 +384,12 @@ func searchFilesConcurrent(ctx context.Context, files []string, srh searcher) *S
 	}
 	output.TotalMatches = len(output.Results)
 
-	// Sort by path, then line number, then column. The sort is stable so that
-	// two matches on the same position keep their discovery order, and the
-	// column tiebreaker makes the order fully deterministic for a repeated
-	// search over the same tree.
-	sort.SliceStable(output.Results, func(i, j int) bool {
-		a, b := output.Results[i], output.Results[j]
-		if a.Path != b.Path {
-			return a.Path < b.Path
+	// Sort by path, then line number.
+	sort.Slice(output.Results, func(i, j int) bool {
+		if output.Results[i].Path != output.Results[j].Path {
+			return output.Results[i].Path < output.Results[j].Path
 		}
-		if a.Line != b.Line {
-			return a.Line < b.Line
-		}
-		return a.Column < b.Column
+		return output.Results[i].Line < output.Results[j].Line
 	})
 
 	return output
@@ -505,8 +536,7 @@ func searchInFile(path string, srh searcher) ([]SearchResult, error) {
 	return results, nil
 }
 
-// formatSearchResults formats search results for display. When the result list
-// was capped, a trailing notice reports how many matches were left out.
+// formatSearchResults formats search results for display.
 func formatSearchResults(output *SearchFilesOutput) string {
 	if len(output.Results) == 0 {
 		return fmt.Sprintf("No matches found in %d files.", output.TotalFiles)
@@ -528,7 +558,7 @@ func formatSearchResults(output *SearchFilesOutput) string {
 			currentPath = r.Path
 		}
 		// Include a compact context snippet. The full context is available on
-		// demand via read_file using start_line/end_line.
+		// demand via read using line_number.
 		builder.WriteString(fmt.Sprintf("   Line %d, Col %d: %s\n", r.Line, r.Column, r.Match))
 		if r.Context != "" {
 			builder.WriteString(r.Context)
@@ -537,9 +567,15 @@ func formatSearchResults(output *SearchFilesOutput) string {
 	}
 
 	if output.Truncated {
-		fmt.Fprintf(&builder,
-			"\n[Results truncated: %d of %d matches shown. Narrow the regex or the path to see the rest.]\n",
-			len(output.Results), output.TotalMatches)
+		if output.TotalMatches > len(output.Results) {
+			fmt.Fprintf(&builder,
+				"\n[Results truncated: %d of %d matches shown. Narrow the regex or the path to see the rest.]\n",
+				len(output.Results), output.TotalMatches)
+		} else {
+			fmt.Fprintf(&builder,
+				"\n[Results truncated: showing the first %d matches; more may exist. Narrow the regex or the path to see the rest.]\n",
+				len(output.Results))
+		}
 	}
 
 	return builder.String()
@@ -640,15 +676,13 @@ func (t *ListCodeDefinitionNamesTool) Execute(ctx context.Context, input json.Ra
 
 	// Analyze each file
 	allDefs := make([]CodeDefinition, 0, 64)
-	truncated := false
 	for _, file := range files {
 		defs := analyzeFile(file)
-		if len(allDefs)+len(defs) > maxDefinitionResults {
-			allDefs = append(allDefs, defs[:maxDefinitionResults-len(allDefs)]...)
-			truncated = true
+		allDefs = append(allDefs, defs...)
+		if len(allDefs) >= maxDefinitionResults {
+			allDefs = allDefs[:maxDefinitionResults]
 			break
 		}
-		allDefs = append(allDefs, defs...)
 	}
 
 	// Store in cache.
@@ -662,13 +696,7 @@ func (t *ListCodeDefinitionNamesTool) Execute(ctx context.Context, input json.Ra
 	listDefCacheMu.Unlock()
 
 	// Format output
-	out := formatCodeDefinitions(allDefs)
-	if truncated {
-		out += fmt.Sprintf(
-			"\n[Definitions truncated at %d entries. Narrow the path or the file_pattern to see the rest.]\n",
-			maxDefinitionResults)
-	}
-	return out, nil
+	return formatCodeDefinitions(allDefs), nil
 }
 
 // analyzeFile analyzes a single file for code definitions
@@ -865,15 +893,15 @@ func analyzeGenericCode(path string, content string) []CodeDefinition {
 	return defs
 }
 
-// formatCodeDefinitions formats code definitions for display. Files are listed
-// in sorted path order and definitions within a file in line order, so the
-// output is identical for identical inputs.
+// formatCodeDefinitions formats code definitions for display
 func formatCodeDefinitions(defs []CodeDefinition) string {
 	if len(defs) == 0 {
 		return "No code definitions found."
 	}
 
-	// Group by file
+	// Group by file — sorted (files + per-file line order) so output is
+	// deterministic regardless of map iteration order (kept from cobot
+	// during the gline alignment).
 	fileDefs := make(map[string][]CodeDefinition)
 	files := make([]string, 0, len(defs))
 	for _, d := range defs {
@@ -889,8 +917,6 @@ func formatCodeDefinitions(defs []CodeDefinition) string {
 
 	for _, file := range files {
 		definitions := fileDefs[file]
-		// Keep per-file line order stable regardless of how the file was
-		// analyzed.
 		sort.SliceStable(definitions, func(i, j int) bool {
 			return definitions[i].Line < definitions[j].Line
 		})

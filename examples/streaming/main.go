@@ -55,12 +55,12 @@ func (p *printer) OnToolCallComplete(tc provider.ToolCall, result string) {
 func main() {
 	prov := provider.NewScriptedProvider(
 		// Turn 1: some streamed text, then a tool call. The loop executes
-		// list_files (a real built-in tool) and feeds the result back.
+		// ls (a real built-in tool) and feeds the result back.
 		provider.TurnScript{
 			Content: "Let me look at the project layout first.",
 			ToolCalls: []provider.ToolCall{{
 				ID:    "call-1",
-				Name:  "list_files",
+				Name:  "ls",
 				Input: `{"path": "."}`,
 			}},
 		},

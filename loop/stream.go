@@ -225,7 +225,7 @@ func (a *BaseAgent) preDispatchToolCall(ctx context.Context, tc ToolCall) {
 	// command execution, browser automation) to avoid race conditions and
 	// duplicate actions. Browser must not background-run due to resource cost.
 	switch tc.Name {
-	case "kb_ingest", "write_to_file", "replace_in_file", "execute_command", "memory_note", "browser_copy":
+	case "kb_ingest", "write", "edit", "run", "memory_note", "browser_copy":
 		return
 	}
 
@@ -278,9 +278,9 @@ func convertTools(toolsList []tools.Tool) []ToolDefinition {
 // filterPlanModeTools filters out act-only tools for plan mode
 func filterPlanModeTools(tools []prompts.ToolDescription) []prompts.ToolDescription {
 	actOnlyTools := map[string]bool{
-		"write_to_file":   true,
-		"replace_in_file": true,
-		"execute_command": true,
+		"write": true,
+		"edit":  true,
+		"run":   true,
 	}
 
 	var filtered []prompts.ToolDescription

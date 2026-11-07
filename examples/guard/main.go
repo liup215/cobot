@@ -52,7 +52,7 @@ func runScenario(name string, guard cobot.ToolGuard, turns ...provider.TurnScrip
 func main() {
 	commandCall := provider.ToolCall{
 		ID:   "call-1",
-		Name: "execute_command",
+		Name: "run",
 		// Harmless on purpose: in the allow scenario the command really
 		// executes (cmd /C on Windows, sh -c elsewhere).
 		Input: `{"command": "echo cleaning ./tmp"}`,
@@ -78,7 +78,7 @@ func main() {
 	// back to the model, which adapts and ends the run another way.
 	runScenario("deny — guard returns (false, reason, nil)",
 		func(ctx context.Context, call cobot.GuardedCall) (bool, string, error) {
-			if call.Name == "execute_command" {
+			if call.Name == "run" {
 				return false, "command execution is disabled in this demo", nil
 			}
 			return true, "", nil
@@ -99,7 +99,7 @@ func main() {
 	// happened because the run was aborted inside the first one.
 	runScenario("abort — guard returns an error wrapping ErrAbortRun",
 		func(ctx context.Context, call cobot.GuardedCall) (bool, string, error) {
-			if call.Name == "execute_command" {
+			if call.Name == "run" {
 				return false, "", fmt.Errorf("policy: %w", cobot.ErrAbortRun)
 			}
 			return true, "", nil

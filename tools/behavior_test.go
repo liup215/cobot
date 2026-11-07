@@ -11,34 +11,19 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/liup215/cobot/shell"
 )
 
-// ─── execute_command ─────────────────────────────────────────────────────────
+// ─── run ──────────────────────────────────────────────────────────────────
 
-// TestShellCommandSelection pins the shell used per operating system so a
-// platform change is a deliberate decision.
-func TestShellCommandSelection(t *testing.T) {
-	if name, args := shellCommand("windows", "dir"); name != "cmd" || strings.Join(args, " ") != "/C dir" {
-		t.Errorf("windows shell = %s %v, want cmd /C <command>", name, args)
+// TestRunTool_DefaultTimeout pins the 120s default documented on the tool
+// description.
+func TestRunTool_DefaultTimeout(t *testing.T) {
+	if shell.DefaultTimeout != 120*time.Second {
+		t.Fatalf("shell.DefaultTimeout = %s, want 120s", shell.DefaultTimeout)
 	}
-	if name, args := shellCommand("linux", "ls -l"); name != "sh" || strings.Join(args, " ") != "-c ls -l" {
-		t.Errorf("linux shell = %s %v, want sh -c <command>", name, args)
-	}
-	if name, args := shellCommand("darwin", "echo hi"); name != "sh" || len(args) != 2 || args[0] != "-c" {
-		t.Errorf("darwin shell = %s %v, want sh -c <command>", name, args)
-	}
-	if name, _ := shellCommand(runtime.GOOS, "x"); name == "" {
-		t.Error("the host operating system must resolve to a shell")
-	}
-}
-
-// TestExecuteCommandTool_DefaultTimeout pins the 120s default documented on the
-// tool description.
-func TestExecuteCommandTool_DefaultTimeout(t *testing.T) {
-	if DefaultCommandTimeoutSeconds != 120 {
-		t.Fatalf("DefaultCommandTimeoutSeconds = %d, want 120", DefaultCommandTimeoutSeconds)
-	}
-	if !strings.Contains(NewExecuteCommandTool().Description(), "default timeout 120s") {
+	if !strings.Contains(NewRunTool().Description(), "Default timeout 120s") {
 		t.Error("the tool description must document the default timeout")
 	}
 }
@@ -47,11 +32,10 @@ func TestExecuteCommandTool_DefaultTimeout(t *testing.T) {
 // result framing (command, exit code, duration, Output/Errors sections).
 func TestExecuteCommandTool_SeparatesStreams(t *testing.T) {
 	var cmd string
-	switch runtime.GOOS {
-	case "windows":
-		cmd = `echo out-line & echo err-line 1>&2`
-	default:
+	if shell.Resolve().IsBash || runtime.GOOS != "windows" {
 		cmd = `echo out-line; echo err-line 1>&2`
+	} else {
+		cmd = `echo out-line & echo err-line 1>&2`
 	}
 
 	out, err := runCommand(t, map[string]any{"command": cmd})
@@ -75,13 +59,9 @@ func TestExecuteCommandTool_SeparatesStreams(t *testing.T) {
 // TestExecuteCommandTool_NonZeroExit pins the failure path: a failing command
 // is reported with its exit code, not turned into a tool error.
 func TestExecuteCommandTool_NonZeroExit(t *testing.T) {
-	var cmd string
-	switch runtime.GOOS {
-	case "windows":
-		cmd = `cmd /C exit 7`
-	default:
-		cmd = `exit 7`
-	}
+	// `exit 7` works under bash/sh (-c) AND cmd (/C) — the resolved shell
+	// executes it either way.
+	cmd := `exit 7`
 
 	out, err := runCommand(t, map[string]any{"command": cmd})
 	if err != nil {
@@ -96,11 +76,10 @@ func TestExecuteCommandTool_NonZeroExit(t *testing.T) {
 // killed, the result reports a timeout and no tool error.
 func TestExecuteCommandTool_Timeout(t *testing.T) {
 	var cmd string
-	switch runtime.GOOS {
-	case "windows":
-		cmd = `ping -n 30 127.0.0.1 >nul`
-	default:
+	if shell.Resolve().IsBash || runtime.GOOS != "windows" {
 		cmd = `sleep 30`
+	} else {
+		cmd = `ping -n 30 127.0.0.1 >nul`
 	}
 
 	out, err := runCommand(t, map[string]any{"command": cmd, "timeout": 1})
@@ -136,51 +115,24 @@ func TestExecuteCommandTool_Cwd(t *testing.T) {
 
 // TestExecuteCommandTool_RequiresCommand guards the empty-command input.
 func TestExecuteCommandTool_RequiresCommand(t *testing.T) {
-	tool := NewExecuteCommandTool()
+	tool := NewRunTool()
 	input, _ := json.Marshal(map[string]any{"command": ""})
 	if _, err := tool.Execute(context.Background(), input); err == nil {
 		t.Error("expected an error for an empty command")
 	}
 }
 
-// TestTruncateCommandOutput unit-tests the output cap: head and tail are kept,
-// the middle is replaced by a marker.
-func TestTruncateCommandOutput(t *testing.T) {
-	if got := truncateCommandOutput("short"); got != "short" {
-		t.Errorf("short output changed: %q", got)
-	}
-
-	long := strings.Repeat("a", 40*1024) + "MIDDLE-MARKER" + strings.Repeat("z", 40*1024)
-	got := truncateCommandOutput(long)
-	if len(got) > MaxCommandOutputBytes+100 {
-		t.Errorf("truncated output too long: %d bytes", len(got))
-	}
-	if !strings.Contains(got, "[... output truncated ...]") {
-		t.Error("truncation marker missing")
-	}
-	if !strings.HasPrefix(got, "a") {
-		t.Error("the head of the output must be kept")
-	}
-	if !strings.HasSuffix(strings.TrimSpace(got), "zzz") {
-		t.Error("the tail of the output must be kept")
-	}
-	if strings.Contains(got, "MIDDLE-MARKER") {
-		t.Error("the middle of the output should be dropped")
-	}
-}
-
-// runCommand executes execute_command with the given input and returns the
-// tool result.
+// runCommand executes run with the given input and returns the tool result.
 func runCommand(t *testing.T, in map[string]any) (string, error) {
 	t.Helper()
 	input, err := json.Marshal(in)
 	if err != nil {
 		t.Fatalf("marshal input: %v", err)
 	}
-	return NewExecuteCommandTool().Execute(context.Background(), input)
+	return NewRunTool().Execute(context.Background(), input)
 }
 
-// ─── write_to_file / replace_in_file ─────────────────────────────────────────
+// ─── write / edit ─────────────────────────────────────────
 
 // TestWriteFileAtomicPreservesMode pins the atomic-write helper: the previous
 // file mode survives an overwrite and a failed write leaves the content alone.
@@ -263,7 +215,7 @@ func TestReplaceInFileIsAllOrNothing(t *testing.T) {
 	}
 }
 
-// ─── list_files ──────────────────────────────────────────────────────────────
+// ─── ls ──────────────────────────────────────────────────────────────
 
 // TestListFilesEntryCap pins the entry cap and its truncation notice.
 func TestListFilesEntryCap(t *testing.T) {
@@ -310,7 +262,7 @@ func TestListFilesToolIsDeterministic(t *testing.T) {
 	}
 
 	input, _ := json.Marshal(map[string]string{"path": dir})
-	tool := NewListFilesTool()
+	tool := NewLsTool()
 	first, err := tool.Execute(context.Background(), input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -320,14 +272,14 @@ func TestListFilesToolIsDeterministic(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if first != second {
-		t.Error("list_files output is not deterministic")
+		t.Error("ls output is not deterministic")
 	}
 	if !strings.Contains(first, "Contents of") {
 		t.Errorf("listing missing its header: %s", first)
 	}
 }
 
-// ─── search_files / list_code_definition_names ──────────────────────────────
+// ─── grep / list_code_definition_names ──────────────────────────────
 
 // TestSearchFilesIsDeterministic pins the sort stability: two identical
 // searches return byte-identical output.
@@ -341,7 +293,7 @@ func TestSearchFilesIsDeterministic(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(dir, name), []byte(b.String()), 0644)
 	}
 
-	tool := NewSearchFilesTool()
+	tool := NewGrepTool()
 	input, _ := json.Marshal(map[string]string{"path": dir, "regex": "needle"})
 	first, err := tool.Execute(context.Background(), input)
 	if err != nil {
@@ -352,7 +304,7 @@ func TestSearchFilesIsDeterministic(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if first != second {
-		t.Error("search_files output is not deterministic across runs")
+		t.Error("grep output is not deterministic across runs")
 	}
 	if !strings.Contains(first, "Line 1, Col 1") {
 		t.Errorf("results not ordered by line: %.200s", first)
@@ -362,6 +314,12 @@ func TestSearchFilesIsDeterministic(t *testing.T) {
 // TestSearchFilesTruncationNotice pins the cap behavior: results are capped,
 // the total is reported truthfully and a notice says what was dropped.
 func TestSearchFilesTruncationNotice(t *testing.T) {
+	// Force the pure-Go fallback: rg kills its scan early at the cap, so its
+	// totals are inherently approximate — honest totals are the Go path's
+	// contract (rg behaviour is covered in search_rg_test).
+	rgPathOverride = "rg-does-not-exist-for-this-test"
+	t.Cleanup(func() { rgPathOverride = "" })
+
 	dir := t.TempDir()
 	var b strings.Builder
 	for i := 1; i <= maxSearchResults+60; i++ {
@@ -369,7 +327,7 @@ func TestSearchFilesTruncationNotice(t *testing.T) {
 	}
 	_ = os.WriteFile(filepath.Join(dir, "big.txt"), []byte(b.String()), 0644)
 
-	tool := NewSearchFilesTool()
+	tool := NewGrepTool()
 	input, _ := json.Marshal(map[string]string{"path": dir, "regex": "needle"})
 	out, err := tool.Execute(context.Background(), input)
 	if err != nil {
@@ -415,7 +373,7 @@ func TestSearchCacheConcurrency(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "x.txt"), []byte("needle\n"), 0644)
 
-	tool := NewSearchFilesTool()
+	tool := NewGrepTool()
 	input, _ := json.Marshal(map[string]string{"path": dir, "regex": "needle"})
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
@@ -502,8 +460,8 @@ func TestAskFollowupHandlerAndOptionMapping(t *testing.T) {
 func TestInteractionToolsAreRegistered(t *testing.T) {
 	reg := InitDefaultRegistry()
 	for _, name := range []string{
-		"read_file", "write_to_file", "replace_in_file", "execute_command",
-		"search_files", "list_files", "list_code_definition_names",
+		"read", "write", "edit", "ls",
+		"run", "grep", "glob",
 		"attempt_completion", "ask_followup_question", "plan_mode_respond",
 	} {
 		if _, err := reg.Get(name); err != nil {

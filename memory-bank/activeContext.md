@@ -2,6 +2,14 @@
 
 ## 当前工作焦点
 
+**工具面与 gline 对齐：run/grep/glob + bash-first（2026-11-07，全量测试 + race 绿，已推送）**：
+- 新包 **`shell/`**：bash-first 解析器（Windows 找 Git Bash、跳过 WSL stub，无 bash 才 `cmd /C`；Unix `bash`→`sh`）+ 共享执行器 `Run(ctx, Spec) → Result`（默认 120s/上限 600s、超时杀进程树 taskkill /F /T + WaitDelay、stdout/stderr 分离、各 32KB 头 3/4+尾 1/4 截断 rune 安全、非 0 退出码=结果）+ `IsDestructiveCommand`/`IsNetworkCommand` + `HideConsole`（GUI 宿主不闪黑窗）。宿主（如 ltedu desktop）可直调 `shell.Run`，不再自建 exec 路径。
+- **工具重命名**：`read_file/write_to_file/replace_in_file/list_files/search_files/execute_command` → **`read/write/edit/ls/grep/run`**；新增 **`glob`**（fd 快路径+纯 Go 回落）与 grep 的 **ripgrep 快路径**（达上限杀扫描）；`list_code_definition_names` 保留实现但不再注册（对齐 gline 2026-09-21 修剪），CAPABILITIES 段同步重写。
+- **run 工具**：gline 的描述（构建时烘入 shell 语法提示，不写 "when available" 向句）+ cobot 硬化（分离采集/树杀/截断）+ **审批钩子 `SetApprovalHandler`**（requires_approval 或破坏性命令触发，fail-closed；nil=不设门，gline 默认无确认）。
+- **合并时保留的 cobot 独有加固**：edit 全有全无、write 原子写+mode、ls 500 条截断、grep 真实 TotalMatches + `[Results truncated]` 通知、formatCodeDefinitions 确定性排序（gline 版是 map 迭代序，非确定）、read/list 字节/条数上限。
+- **验证**：`go test ./...` 8 包全绿（prompt-guard 双向一致含新面）、`-race ./tools ./loop ./shell` 绿、gofmt 清；测试从 gline 移植（command/find_files/search_rg/file/search）+ behavior_test 重写适配。
+- **下游**：ltedu desktop 升级 cobot 后全换内置（注册 read/ls/write/edit/grep/glob/run + 审批钩子接现有确认 modal，删除本地 execute_command/internal/shell 副本）。
+
 **M5 发布收尾完成（2026-09-07）**：
 - examples 四件套新建（均可离线 `go run ./examples/<name>`，scripted provider 回放，
   无需 API key）：

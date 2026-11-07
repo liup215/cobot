@@ -156,7 +156,7 @@ func toolUseStream() []string {
 		sseEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
 		sseEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me check."}}`),
 		sseEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
-		sseEvent("content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"read_file","input":{}}}`),
+		sseEvent("content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"read","input":{}}}`),
 		sseEvent("content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}`),
 		sseEvent("content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"a.txt\"}"}}`),
 		sseEvent("content_block_stop", `{"type":"content_block_stop","index":1}`),
@@ -210,7 +210,7 @@ func TestAnthropicStreamToolUseIncremental(t *testing.T) {
 		t.Fatalf("got %d partial tool-call chunks, want 2 (one per input_json_delta)", len(partials))
 	}
 	last := partials[len(partials)-1].ToolCall
-	if last.ID != "toolu_01" || last.Name != "read_file" {
+	if last.ID != "toolu_01" || last.Name != "read" {
 		t.Errorf("partial tool call id/name = %q/%q", last.ID, last.Name)
 	}
 	if last.Input != `{"path":"a.txt"}` {
@@ -220,7 +220,7 @@ func TestAnthropicStreamToolUseIncremental(t *testing.T) {
 	if complete == nil {
 		t.Fatalf("no complete tool call chunk received")
 	}
-	if complete.ID != "toolu_01" || complete.Name != "read_file" {
+	if complete.ID != "toolu_01" || complete.Name != "read" {
 		t.Errorf("complete tool call id/name = %q/%q", complete.ID, complete.Name)
 	}
 	if complete.Input != `{"path":"a.txt"}` {
@@ -239,10 +239,10 @@ func TestAnthropicStreamToolUseIncremental(t *testing.T) {
 func TestAnthropicStreamMultipleToolCalls(t *testing.T) {
 	srv := newAnthropicSSEServer(t,
 		messageStartEvent(30),
-		sseEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_a","name":"read_file","input":{}}}`),
+		sseEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_a","name":"read","input":{}}}`),
 		sseEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a.txt\"}"}}`),
 		sseEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
-		sseEvent("content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_b","name":"list_files","input":{}}}`),
+		sseEvent("content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_b","name":"ls","input":{}}}`),
 		sseEvent("content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"dir\":\".\"}"}}`),
 		sseEvent("content_block_stop", `{"type":"content_block_stop","index":1}`),
 		messageDeltaEvent("tool_use"),
@@ -274,10 +274,10 @@ func TestAnthropicStreamMultipleToolCalls(t *testing.T) {
 	if len(complete) != 2 {
 		t.Fatalf("got %d complete tool calls, want 2", len(complete))
 	}
-	if complete[0].ID != "toolu_a" || complete[0].Name != "read_file" || complete[0].Input != `{"path":"a.txt"}` {
+	if complete[0].ID != "toolu_a" || complete[0].Name != "read" || complete[0].Input != `{"path":"a.txt"}` {
 		t.Errorf("first tool call = %+v", complete[0])
 	}
-	if complete[1].ID != "toolu_b" || complete[1].Name != "list_files" || complete[1].Input != `{"dir":"."}` {
+	if complete[1].ID != "toolu_b" || complete[1].Name != "ls" || complete[1].Input != `{"dir":"."}` {
 		t.Errorf("second tool call = %+v", complete[1])
 	}
 }
@@ -333,7 +333,7 @@ func TestAnthropicStreamThinking(t *testing.T) {
 func TestAnthropicStreamZeroArgToolCall(t *testing.T) {
 	srv := newAnthropicSSEServer(t,
 		messageStartEvent(10),
-		sseEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_00","name":"list_files","input":{}}}`),
+		sseEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_00","name":"ls","input":{}}}`),
 		sseEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
 		messageDeltaEvent("tool_use"),
 		sseEvent("message_stop", `{"type":"message_stop"}`),
@@ -361,7 +361,7 @@ func TestAnthropicStreamZeroArgToolCall(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("got %d complete tool calls, want 1", len(calls))
 	}
-	if calls[0].ID != "toolu_00" || calls[0].Name != "list_files" {
+	if calls[0].ID != "toolu_00" || calls[0].Name != "ls" {
 		t.Errorf("tool call id/name = %q/%q", calls[0].ID, calls[0].Name)
 	}
 	if calls[0].Input != "{}" {
@@ -589,7 +589,7 @@ func TestAnthropicStreamEOFWithoutMessageStop(t *testing.T) {
 func TestAnthropicStreamTruncatedToolCall(t *testing.T) {
 	srv := newAnthropicSSEServer(t,
 		messageStartEvent(4),
-		sseEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_cut","name":"read_file","input":{}}}`),
+		sseEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_cut","name":"read","input":{}}}`),
 		sseEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a.txt\""}}`),
 		// EOF: no content_block_stop, no message_delta, no message_stop
 	)
@@ -616,7 +616,7 @@ func TestAnthropicStreamTruncatedToolCall(t *testing.T) {
 	if call == nil {
 		t.Fatal("truncated tool call was not recovered")
 	}
-	if call.ID != "toolu_cut" || call.Name != "read_file" {
+	if call.ID != "toolu_cut" || call.Name != "read" {
 		t.Errorf("tool call id/name = %q/%q", call.ID, call.Name)
 	}
 	if call.Input != `{"path":"a.txt"}` {
@@ -789,7 +789,7 @@ func TestAnthropicStreamToolCallMissingIdentity(t *testing.T) {
 func TestAnthropicStreamToolCallUnrepairableJSON(t *testing.T) {
 	srv := newAnthropicSSEServer(t,
 		messageStartEvent(1),
-		sseEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_bad","name":"read_file"}}`),
+		sseEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_bad","name":"read"}}`),
 		sseEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\": }"}}`),
 		sseEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
 		messageDeltaEvent("tool_use"),

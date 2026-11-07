@@ -189,13 +189,13 @@ behavior below is pinned by tests (`tools/behavior_test.go`):
 
 | Tool | Finalized behavior |
 |---|---|
-| `read_file` | Whole-file reads capped at 64KB (`MaxReadFileBytes`), `start_line/end_line` range reads at 100KB; larger inputs return the head plus a truncation notice (real byte/line counts and pointers to alternatives) instead of being rejected; truncation is rune-boundary safe (no U+FFFD for Chinese/emoji) |
-| `write_to_file` | Atomic write: same-directory temp file + `rename`, preserving the original file mode; a failed write never destroys the original. Creates directories as needed |
-| `replace_in_file` | All blocks are applied in memory first; any `search` mismatch → the file is left untouched and the failing block is named (all-or-nothing); the result is written back atomically |
-| `execute_command` | Foreground, blocking, default timeout 120s (per-call `timeout` override); on timeout the whole process tree is killed (Windows `taskkill /F /T` + `WaitDelay` backstop); stdout/stderr captured separately, each truncated at 32KB (head 3/4 + tail 1/4 + marker, rune-boundary safe); shell pinned: `cmd /C` on Windows, `sh -c` elsewhere. A non-zero exit code is a result, not an error. Not for long-running services |
-| `search_files` | Deterministic ordering (path → line → column, stable sort); `TotalMatches` reports the real hit count; results beyond 500 are truncated with a `[Results truncated: …]` notice |
-| `list_files` | Entries sorted by filename (`os.ReadDir` semantics, pinned); truncated past 500 entries with a notice |
-| `list_code_definition_names` | Sorted by file path, then stably by line within each file (reproducible output); truncated past 500 entries with a notice |
+| `read` | Line-paged reads: 1000 lines by default, `limit` up to 2000 lines, 50KB byte cap per chunk (truncated with a `[Chunk truncated … Continue with line_number=N]` pointer, rune-boundary safe); `~` expansion and relative paths made absolute; image files return metadata instead of binary |
+| `write` | Atomic write: same-directory temp file + `rename`, preserving the original file mode; a failed write never destroys the original. Creates directories as needed |
+| `edit` | All blocks are applied in memory first; any `search` mismatch → the file is left untouched and the failing block is named (all-or-nothing); the result is written back atomically |
+| `run` | **Shell resolution prefers bash** (finds Git Bash on Windows, WSL stubs skipped; `cmd /C` only as fallback; `bash`→`sh` on Unix), with the syntax hint baked into the tool description; foreground, blocking, default timeout 120s (per-call `timeout`, capped at 600s); on timeout the whole process tree is killed (`taskkill /F /T` + `WaitDelay` backstop on Windows); stdout/stderr captured separately, each truncated at 32KB (head 3/4 + tail 1/4 + marker, rune-boundary safe); a non-zero exit code is a result, not an error; `requires_approval` or destructive commands go through the approval hook (`SetApprovalHandler`, fail-closed). Not for long-running services |
+| `grep` | **ripgrep fast path** when `rg` is installed (parallel traversal, .gitignore-aware, scan killed at the cap), falling back to a concurrent pure-Go walk; deterministic ordering (path → line → column, stable sort); `TotalMatches` reports the real hit count; results beyond 500 are truncated with a `[Results truncated: …]` notice |
+| `ls` | Entries sorted by filename (`os.ReadDir` semantics, pinned); truncated past 500 entries with a notice |
+| `glob` | Recursive filename glob; **fd fast path** when `fd` is installed (parallel + .gitignore-aware), falling back to a pure-Go walk; returns up to 500 paths |
 | `attempt_completion` | Terminal tool: `result` required, optional `command` (a command for the user to verify the result) |
 | `ask_followup_question` | Clarification question, does not end the run; `SetHandler` injects the interaction side (TUI/host), falling back to stdin; answers may be given by option index; in headless use a handler error is fed back to the model as text and the run continues |
 | `plan_mode_respond` | Plan-mode terminal tool: the response is echoed back verbatim |

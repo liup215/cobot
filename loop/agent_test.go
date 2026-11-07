@@ -509,7 +509,7 @@ func TestPlanModeBlocksActOnlyTool(t *testing.T) {
 	prov := provider.NewScriptedProvider(
 		provider.TurnScript{ToolCalls: []provider.ToolCall{{
 			ID:    "c1",
-			Name:  "write_to_file",
+			Name:  "write",
 			Input: `{"path":"x.txt","content":"hi"}`,
 		}}},
 		provider.TurnScript{ToolCalls: []provider.ToolCall{{

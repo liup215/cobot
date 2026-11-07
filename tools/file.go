@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,18 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode"
-)
-
-// Read limits shared by read_file. Files above MaxReadFileBytes are returned
-// truncated from the head with an explicit notice (never silently, never as a
-// hard refusal), and a requested line range above MaxReadRangeBytes is
-// truncated the same way.
-const (
-	// MaxReadFileBytes caps a whole-file read.
-	MaxReadFileBytes = 64 * 1024
-
-	// MaxReadRangeBytes caps a start_line/end_line range read.
-	MaxReadRangeBytes = 100 * 1024
+	"unicode/utf8"
 )
 
 // ReadFileTool reads the contents of a file
@@ -27,29 +17,109 @@ type ReadFileTool struct {
 	BaseTool
 }
 
-// ReadFileInput represents the input for read_file tool
-type ReadFileInput struct {
-	Path      string `json:"path"`
-	StartLine int    `json:"start_line,omitempty"`
-	EndLine   int    `json:"end_line,omitempty"`
+// writeFileAtomic writes via a temp file + rename so a crash mid-write can
+// never truncate the target (preserved from cobot's file.go during the
+// gline tool-surface alignment).
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	mode := os.FileMode(0644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func(e error) error {
+		tmp.Close()
+		os.Remove(tmpName)
+		return e
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return cleanup(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return cleanup(err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
-// NewReadFileTool creates a new read_file tool
+// ReadFileInput represents the input for read tool
+type ReadFileInput struct {
+	Path       string `json:"path"`
+	LineNumber int    `json:"line_number,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+}
+
+// NewReadFileTool creates a new read tool
+const (
+	readFileChunkLines = 1000      // default page size
+	readFileMaxLines   = 2000      // hard cap per read (raise via limit)
+	readFileMaxBytes   = 50 * 1024 // byte cap on returned content
+)
+
+// imageExts marks extensions treated as image files: their bytes cannot be
+// returned as text, so the tool reports metadata instead of binary garbage.
+var imageExts = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
+	".webp": true, ".bmp": true, ".svg": true, ".ico": true,
+	".tiff": true, ".tif": true, ".heic": true,
+}
+
+// expandPath resolves a leading ~/ to the user's home directory.
+func expandPath(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") || strings.HasPrefix(p, "~\\") {
+		if home, err := os.UserHomeDir(); err == nil {
+			if p == "~" {
+				return home
+			}
+			return filepath.Join(home, p[2:])
+		}
+	}
+	return p
+}
+
+// formatBytes renders a byte count for human-readable notices.
+func formatBytes(n int) string {
+	switch {
+	case n >= 1024*1024:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+	case n >= 1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
 func NewReadFileTool() *ReadFileTool {
 	schema := json.RawMessage(`{
 		"type": "object",
 		"properties": {
 			"path": {
 				"type": "string",
-				"description": "The path of the file to read"
+				"description": "The path of the file to read. Supports ~ (home), relative, and absolute paths."
 			},
-			"start_line": {
+			"line_number": {
 				"type": "integer",
-				"description": "Optional 1-based starting line number. Use this to read a specific range instead of the whole file."
+				"description": "Optional 1-based starting line number. If omitted, reads from line 1."
 			},
-			"end_line": {
+			"limit": {
 				"type": "integer",
-				"description": "Optional 1-based ending line number (0 means read to end). Use together with start_line."
+				"description": "Optional number of lines to read (default 1000, max 2000)."
 			}
 		},
 		"required": ["path"]
@@ -57,13 +127,13 @@ func NewReadFileTool() *ReadFileTool {
 
 	return &ReadFileTool{
 		BaseTool: BaseTool{
-			name: "read_file",
-			description: fmt.Sprintf(
-				"Read the contents of a file at the specified path. Whole-file reads are capped at "+
-					"%dKB and line-range reads at %dKB; anything larger is returned truncated from the "+
-					"head with a notice reporting the total size. Prefer search_files first to find the "+
-					"relevant sections, then use start_line/end_line to read only that range.",
-				MaxReadFileBytes/1024, MaxReadRangeBytes/1024),
+			name: "read",
+			description: "Read lines from a file. Supports ~ (home), relative, and absolute paths. " +
+				fmt.Sprintf("Reads %d lines by default starting at line_number; pass limit for more (max %d per read). ", readFileChunkLines, readFileMaxLines) +
+				"Output reports the line range, total line count and the next line_number to continue from. " +
+				"For large files, use grep first to find a relevant section, then read that chunk with line_number. " +
+				"If output is truncated, continue from the reported next line_number instead of re-reading the whole file. " +
+				"Do not use run (cat/head/tail) to read files.",
 			inputSchema: schema,
 		},
 	}
@@ -80,20 +150,33 @@ func (t *ReadFileTool) Execute(ctx context.Context, input json.RawMessage) (stri
 		return "", fmt.Errorf("path is required")
 	}
 
-	// Clean the path
-	path := filepath.Clean(req.Path)
+	// Resolve the path: expand ~, then make absolute against the cwd so the
+	// output prefix is stable no matter where later tools run.
+	path := filepath.Clean(expandPath(req.Path))
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
 
 	// Check if file exists
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("file not found: %s", path)
+			return "", fmt.Errorf("file not found: %s (check the path, or use glob/grep to locate it)", path)
 		}
 		return "", fmt.Errorf("failed to stat file: %w", err)
 	}
 
 	if info.IsDir() {
-		return "", fmt.Errorf("path is a directory, not a file: %s", path)
+		return "", fmt.Errorf("path is a directory, not a file: %s (use ls or glob to explore it)", path)
+	}
+
+	// Image files: binary content cannot be returned as text — report
+	// metadata instead of returning base64 garbage that would flood context.
+	ext := strings.ToLower(filepath.Ext(path))
+	if imageExts[ext] {
+		return fmt.Sprintf("[Image file: %s (%s, %s). Image content cannot be displayed yet. "+
+			"If you need its pixels, process it via run (e.g. a script); otherwise ask the user to describe it.]",
+			path, strings.TrimPrefix(ext, "."), formatBytes(int(info.Size()))), nil
 	}
 
 	// Read file
@@ -102,38 +185,63 @@ func (t *ReadFileTool) Execute(ctx context.Context, input json.RawMessage) (stri
 		return "", fmt.Errorf("failed to read file: %w", err)
 	}
 
-	// If a line range is requested, slice the content first.
-	if req.StartLine > 0 || req.EndLine > 0 {
-		sliced, start, end, err := sliceLines(content, req.StartLine, req.EndLine)
-		if err != nil {
-			return "", fmt.Errorf("invalid line range: %w", err)
-		}
-		// Even for ranges, enforce a byte cap so an enormous range cannot
-		// explode the context. The cut backs off to a rune boundary so a
-		// multi-byte character is never split in half.
-		if len(sliced) > MaxReadRangeBytes {
-			head := truncateUTF8Prefix(string(sliced), MaxReadRangeBytes)
-			return fmt.Sprintf("%s\n\n[Range truncated: requested lines %d-%d, %d bytes total, showing first %d bytes. Re-read with a narrower range for the rest.]",
-				head, start, end, len(sliced), len(head)), nil
-		}
-		return fmt.Sprintf("[Lines %d-%d of %s]\n%s", start, end, path, string(sliced)), nil
+	// Empty file: short-circuit before line math.
+	if len(content) == 0 {
+		return fmt.Sprintf("[Empty file: %s]", path), nil
 	}
 
-	// Large-file strategy: return the head of the file with an explicit
-	// truncation notice instead of refusing, so the model keeps working
-	// context (imports, types, first definitions) and knows exactly what it
-	// did not see.
-	if len(content) > MaxReadFileBytes {
-		lineCount := countLines(content)
-		head := truncateUTF8Prefix(string(content), MaxReadFileBytes)
-		return fmt.Sprintf(
-			"%s\n\n[File truncated: %s is %d bytes and %d lines, showing the first %d bytes. "+
-				"Use start_line/end_line for a specific range or search_files to locate sections.]",
-			head, path, len(content), lineCount, len(head),
-		), nil
+	// Single pass over the raw bytes for the total line count (no string copy).
+	lineCount := bytes.Count(content, []byte("\n")) + 1
+
+	// Page size: default chunk, raisable via limit up to the hard cap.
+	limit := req.Limit
+	if limit <= 0 {
+		limit = readFileChunkLines
+	}
+	if limit > readFileMaxLines {
+		limit = readFileMaxLines
 	}
 
-	return string(content), nil
+	startLine := req.LineNumber
+	if startLine <= 0 {
+		startLine = 1
+	}
+	if startLine > lineCount {
+		return "", fmt.Errorf("line_number %d is beyond end of file (%s has %d lines)", startLine, path, lineCount)
+	}
+	endLine := startLine + limit - 1
+
+	sliced, start, end, err := sliceLines(content, startLine, endLine)
+	if err != nil {
+		return "", fmt.Errorf("invalid line number: %w", err)
+	}
+
+	prefix := fmt.Sprintf("[Lines %d-%d of %s (total %d lines)]\n", start, end, path, lineCount)
+
+	// Byte cap on returned content so enormous lines cannot flood context.
+	// Cut at the last complete line within the cap; a single oversized line
+	// falls back to a raw cut trimmed to a valid UTF-8 boundary.
+	if len(sliced) > readFileMaxBytes {
+		cut := sliced[:readFileMaxBytes]
+		if idx := bytes.LastIndexByte(cut, '\n'); idx > 0 {
+			cut = cut[:idx+1]
+		} else {
+			for len(cut) > 0 && !utf8.Valid(cut) {
+				cut = cut[:len(cut)-1]
+			}
+		}
+		shownLines := start + bytes.Count(cut, []byte("\n")) - 1
+		return fmt.Sprintf("%s%s\n\n[Chunk truncated: %s byte limit reached (chunk was %s). Continue with line_number=%d.]",
+			prefix, string(cut), formatBytes(readFileMaxBytes), formatBytes(len(sliced)), shownLines+1), nil
+	}
+
+	// Large file guard: if this is not the full file, tell the model how to move forward.
+	if end < lineCount {
+		return fmt.Sprintf("%s%s\n\n[File continues: showing lines %d-%d of %d (%d remaining). Use line_number=%d to read the next chunk, or raise limit (max %d).]",
+			prefix, string(sliced), start, end, lineCount, lineCount-end, end+1, readFileMaxLines), nil
+	}
+
+	return prefix + string(sliced), nil
 }
 
 // WriteFileTool writes content to a file
@@ -141,21 +249,19 @@ type WriteFileTool struct {
 	BaseTool
 }
 
-// WriteFileInput represents the input for write_to_file tool
+// WriteFileInput represents the input for write tool
 type WriteFileInput struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
 }
 
-// NewWriteFileTool creates a new write_to_file tool
+// NewWriteFileTool creates a new write tool
 func NewWriteFileTool() *WriteFileTool {
 	return &WriteFileTool{
 		BaseTool: BaseTool{
-			name: "write_to_file",
-			description: "Write content to a file at the specified path. If the file exists, it will be overwritten " +
-				"atomically: the new content is written to a temporary file and renamed into place, so a failed " +
-				"write never destroys the previous content. Use this when creating new files or completely " +
-				"rewriting existing files.",
+			name: "write",
+			description: "Write content to a file at the specified path. If the file exists, it will be overwritten. Use this when creating new files or completely rewriting existing files. " +
+				"For small targeted changes to an existing file, use edit instead — a full overwrite risks losing content you have not read.",
 			inputSchema: PathAndContentSchema,
 		},
 	}
@@ -187,7 +293,7 @@ func (t *WriteFileTool) Execute(ctx context.Context, input json.RawMessage) (str
 		existed = true
 	}
 
-	// Write file atomically: on any failure the previous content survives.
+	// Write file
 	if err := writeFileAtomic(path, []byte(req.Content)); err != nil {
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
@@ -198,48 +304,6 @@ func (t *WriteFileTool) Execute(ctx context.Context, input json.RawMessage) (str
 	}
 
 	return fmt.Sprintf("File %s successfully: %s (%d bytes)", action, path, len(req.Content)), nil
-}
-
-// writeFileAtomic replaces path with data through a temporary file in the same
-// directory followed by a rename, so readers never observe a partial file and
-// a failed write leaves the original untouched. The previous file's mode is
-// preserved; new files get 0644.
-func writeFileAtomic(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	mode := os.FileMode(0644)
-	if info, err := os.Stat(path); err == nil {
-		mode = info.Mode().Perm()
-	}
-
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	if err := os.Chmod(tmpName, mode); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	return nil
 }
 
 // ReplaceInFileTool replaces content in a file using SEARCH/REPLACE blocks
@@ -253,7 +317,7 @@ type ReplacementBlock struct {
 	Replace string `json:"replace"`
 }
 
-// ReplaceInFileInput represents the input for replace_in_file tool.
+// ReplaceInFileInput represents the input for edit tool.
 // Supports two calling styles:
 //   - Single block: path + search + replace
 //   - Multiple blocks: path + replacements (array of {search, replace})
@@ -266,7 +330,7 @@ type ReplaceInFileInput struct {
 	Replacements []ReplacementBlock `json:"replacements"`
 }
 
-// NewReplaceInFileTool creates a new replace_in_file tool
+// NewReplaceInFileTool creates a new edit tool
 func NewReplaceInFileTool() *ReplaceInFileTool {
 	schema := json.RawMessage(`{
 		"type": "object",
@@ -307,18 +371,16 @@ func NewReplaceInFileTool() *ReplaceInFileTool {
 
 	return &ReplaceInFileTool{
 		BaseTool: BaseTool{
-			name: "replace_in_file",
-			description: "Replace specific content in a file using exact search/replace. Supports single blocks or an " +
-				"array of replacements for multiple edits. All blocks are applied to an in-memory copy first: if any " +
-				"block fails to match, the file is left untouched and the error names the failing block. The result is " +
-				"written back atomically. Use this for targeted modifications to existing files.",
+			name: "edit",
+			description: "Replace content in a file by exact string match. search must match the file EXACTLY, including whitespace and indentation — read the file first and copy-paste the text to replace. " +
+				"Supports a single block or an array of replacements for multiple edits in one call. Use it for targeted modifications; use write for new files or full rewrites.",
 			inputSchema: schema,
 		},
 	}
 }
 
-// Execute replaces content in the file with full error feedback, multi-block
-// support, whitespace tolerance, and diff output.
+// Execute replaces content in the file with full error feedback,
+// multi-block support, whitespace tolerance, and diff output.
 func (t *ReplaceInFileTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var req ReplaceInFileInput
 	if err := ParseInput(input, &req); err != nil {
@@ -374,11 +436,11 @@ func (t *ReplaceInFileTool) Execute(ctx context.Context, input json.RawMessage) 
 					"  • Indentation characters\n"+
 					"  • Trailing spaces\n\n"+
 					"TROUBLESHOOTING:\n"+
-					"1. Use read_file to get the CURRENT file content\n"+
+					"1. Use read to get the CURRENT file content\n"+
 					"2. Copy-paste the EXACT text you want to replace\n"+
 					"3. Check for tabs vs spaces - they are different!\n"+
 					"4. Try searching for a smaller unique substring\n"+
-					"5. For complex edits, consider using write_to_file instead",
+					"5. For complex edits, consider using write instead",
 				i+1,
 			)
 		}
@@ -386,7 +448,7 @@ func (t *ReplaceInFileTool) Execute(ctx context.Context, input json.RawMessage) 
 		results = append(results, fmt.Sprintf("Block %d: replaced at byte offset %d", i+1, idx))
 	}
 
-	// Write back atomically: a failed write leaves the original file intact.
+	// Write back
 	if err := writeFileAtomic(path, []byte(content)); err != nil {
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
@@ -629,23 +691,29 @@ func sliceLines(content []byte, startLine, endLine int) ([]byte, int, int, error
 	return []byte(out), startLine, effectiveEnd, nil
 }
 
-// countLines returns the number of newline-separated lines.
-func countLines(content []byte) int {
-	return strings.Count(string(content), "\n") + 1
+// estimateTokensFromBytes gives a conservative token estimate from raw bytes.
+func estimateTokensFromBytes(b []byte) int {
+	// Approximate: 1 token per 3 bytes for ASCII-heavy text; 1 token per byte
+	// for CJK-heavy text. We use a middle ground of 1 token per 2 bytes to be
+	// conservative without overcounting pure ASCII.
+	return len(b) / 2
 }
 
-// ListFilesTool lists files and directories
-type ListFilesTool struct {
+// countLines removed: read tool now counts lines in a single bytes.Count pass
+// over the raw content (no string copy).
+
+// LsTool lists files and directories
+type LsTool struct {
 	BaseTool
 }
 
-// ListFilesInput represents the input for list_files tool
-type ListFilesInput struct {
+// LsInput represents the input for ls tool
+type LsInput struct {
 	Path string `json:"path"`
 }
 
-// NewListFilesTool creates a new list_files tool
-func NewListFilesTool() *ListFilesTool {
+// NewLsTool creates a new ls tool
+func NewLsTool() *LsTool {
 	schema := json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -657,18 +725,19 @@ func NewListFilesTool() *ListFilesTool {
 		"required": ["path"]
 	}`)
 
-	return &ListFilesTool{
+	return &LsTool{
 		BaseTool: BaseTool{
-			name:        "list_files",
-			description: "List files and directories at the specified path. Use this to explore the file system.",
+			name: "ls",
+			description: "List the files and directories at the specified path, with names, types and sizes. Use it to explore a directory. " +
+				"To find files by name pattern anywhere below a directory, use glob; to search file contents, use grep.",
 			inputSchema: schema,
 		},
 	}
 }
 
 // Execute lists files
-func (t *ListFilesTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
-	var req ListFilesInput
+func (t *LsTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
+	var req LsInput
 	if err := ParseInput(input, &req); err != nil {
 		return "", err
 	}
@@ -705,18 +774,18 @@ func (t *ListFilesTool) Execute(ctx context.Context, input json.RawMessage) (str
 	return result.String(), nil
 }
 
-// MaxListEntries caps how many directory entries list_files reports. The
-// remaining count is reported in a trailing notice.
-const MaxListEntries = 500
-
-// listFiles writes the directory listing. os.ReadDir returns entries sorted by
-// filename, which the tool relies on for stable output.
 func listFiles(path string, result *strings.Builder) error {
 	return listFilesUpTo(path, result, MaxListEntries)
 }
 
-// listFilesUpTo writes at most max entries and appends a truncation notice when
-// the directory holds more.
+// MaxListEntries caps how many directory entries the ls tool reports. The
+// remaining count is reported in a trailing notice (kept from cobot during
+// the gline alignment — an uncapped listing of a huge directory would blow
+// the context budget).
+const MaxListEntries = 500
+
+// listFilesUpTo writes at most max entries and appends a truncation notice
+// when the directory holds more. max <= 0 means no cap.
 func listFilesUpTo(path string, result *strings.Builder, max int) error {
 	entries, err := os.ReadDir(path)
 	if err != nil {
