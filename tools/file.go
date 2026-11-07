@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/liup215/cobot/docparse"
 )
 
 // ReadFileTool reads the contents of a file
@@ -70,7 +73,19 @@ const (
 	readFileChunkLines = 1000      // default page size
 	readFileMaxLines   = 2000      // hard cap per read (raise via limit)
 	readFileMaxBytes   = 50 * 1024 // byte cap on returned content
+
+	// maxExtractBytes caps files sent through document extraction (the whole
+	// file is parsed into text in memory).
+	maxExtractBytes = 64 << 20
 )
+
+// headBytes returns the first 64 bytes of a buffer for magic sniffing.
+func headBytes(b []byte) []byte {
+	if len(b) > 64 {
+		return b[:64]
+	}
+	return b
+}
 
 // imageExts marks extensions treated as image files: their bytes cannot be
 // returned as text, so the tool reports metadata instead of binary garbage.
@@ -130,6 +145,10 @@ func NewReadFileTool() *ReadFileTool {
 			name: "read",
 			description: "Read lines from a file. Supports ~ (home), relative, and absolute paths. " +
 				fmt.Sprintf("Reads %d lines by default starting at line_number; pass limit for more (max %d per read). ", readFileChunkLines, readFileMaxLines) +
+				"Documents (PDF, Word incl. .doc, Excel incl. .xls, PowerPoint, OpenDocument, RTF, HTML, EPUB) have their " +
+				"text extracted automatically before paging — line_number works on the extracted text; a zip bundle " +
+				"returns its entry listing. Images and files with no text layer report metadata/a notice instead of " +
+				"content — do not retry those. " +
 				"Output reports the line range, total line count and the next line_number to continue from. " +
 				"For large files, use grep first to find a relevant section, then read that chunk with line_number. " +
 				"If output is truncated, continue from the reported next line_number instead of re-reading the whole file. " +
@@ -185,6 +204,24 @@ func (t *ReadFileTool) Execute(ctx context.Context, input json.RawMessage) (stri
 		return "", fmt.Errorf("failed to read file: %w", err)
 	}
 
+	// Document extraction: containers (PDF/Office/RTF/ODF/EPUB/zip) and
+	// tag-based formats route through docparse first — the shared registry
+	// also used by knowledge-base imports — so a PDF behaves like any other
+	// line-paged text file. Plain text comes back verbatim from ExtractText,
+	// so the line paging below is identical for both paths.
+	if docparse.NeedsExtraction(headBytes(content)) && int64(len(content)) > maxExtractBytes {
+		return "", fmt.Errorf("file too large to extract (%d MB, max %d MB) — read it in another way", int64(len(content))>>20, maxExtractBytes>>20)
+	}
+	text, err := docparse.ExtractText(path, content)
+	if err != nil {
+		if errors.Is(err, docparse.ErrNoTextLayer) {
+			return fmt.Sprintf("[binary file: %s, %d bytes — no text layer (image/archive/unsupported format); use information already present in the conversation]", path, info.Size()), nil
+		}
+		return "", err
+	}
+	extracted := text != string(content)
+	content = []byte(text)
+
 	// Empty file: short-circuit before line math.
 	if len(content) == 0 {
 		return fmt.Sprintf("[Empty file: %s]", path), nil
@@ -217,6 +254,10 @@ func (t *ReadFileTool) Execute(ctx context.Context, input json.RawMessage) (stri
 	}
 
 	prefix := fmt.Sprintf("[Lines %d-%d of %s (total %d lines)]\n", start, end, path, lineCount)
+	if extracted {
+		prefix = fmt.Sprintf("[Lines %d-%d of %s (total %d lines, text extracted from %s)]\n",
+			start, end, path, lineCount, strings.ToLower(filepath.Ext(path)))
+	}
 
 	// Byte cap on returned content so enormous lines cannot flood context.
 	// Cut at the last complete line within the cap; a single oversized line

@@ -3,8 +3,9 @@
 ## 技术栈
 
 - **语言**：Go 1.25（兼容 maestro 的 1.26）
-- **依赖**：运行时仅 stdlib；测试仅 stdlib（testing/httptest）；
-  日志 `log/slog`；无 CGO
+- **依赖**（2026-11-07 政策修订，用户拍板「零依赖无意义，cobot 是基础框架」）：
+  允许**纯 Go** 第三方库，当前仅文档解析所需：gopdf、striprtf、
+  go-word-extractor、Clownsw/xls（及其传递依赖）；日志 `log/slog`；无 CGO
 - **模块**：`github.com/liup215/cobot`
 - **License**：MIT
 
@@ -53,7 +54,7 @@ gh release create v0.1.0 --title "v0.1.0" --notes "..."
 
 ## 技术约束
 
-- go.mod require 不得出现第三方包（CI/验收用 `go list -m all` 检查）。
+- go.mod 第三方依赖限纯 Go（无 CGO）；2026-11-07 前的「不得出现第三方包」约束作废（见上）。
 - 单文件 ≤ ~400 行（loop 拆分后的上限）。
 - 三平台（win/linux/darwin）可编译可测试。
 - 破坏性 API 变更仅允许在 v0.x；v1.0 前冻结模块路径。

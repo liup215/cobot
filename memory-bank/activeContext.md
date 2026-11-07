@@ -2,6 +2,12 @@
 
 ## 当前工作焦点
 
+**解析层抽出 + read 合并文档提取（2026-11-07 第二轮，全量测试绿，已推送）**：用户定位修订——**cobot = agent 基础框架，含默认工具与基础能力；「零依赖」无意义（只约束自己），desktop 只留 ltedu 产品特有工具**。本轮：
+- 新公共包 **`docparse/`**：文档解析注册表从 ltedu desktop `internal/knowledge` 抽出（内容嗅探分发：PDF/RTF/ZIP→OOXML·ODF·EPUB·归档清单/OLE→legacy doc·xls·ppt/HTML/纯文本嗅探；`ErrNoTextLayer`/`LooksLikePlainText`/`NeedsExtraction`），**desktop 的 knowledge KB 导入改为调用本包**——解析层单源，谁需要谁调；测试+3 个 fixture（legacy.doc/xls、sample.rtf）随迁。
+- **read 合并文档提取**：`tools/file.go` 读文件后走 `docparse.ExtractText`——普通文本原样返回（行分页路径完全不变），文档先抽文本再按行分页（头标注 `text extracted from …`，`line_number` 作用于提取文本），无文本层→友好 `[binary file: …]` 提示（结果非错误，不重试），>64MB 提取上限；`read_local_file`（desktop 侧）本轮后删除。
+- **依赖政策**：go.mod 引入 gopdf/striprtf/go-word-extractor/Clownsw/xls（全纯 Go）；README 双语 tagline、requirements/techContext 的零依赖表述已修订（无 CI 门禁，仅文档口径）。
+- 验证：`go test ./...` 9 包全绿（docparse 迁移测试 + read 提取 5 组新测试）+ vet + gofmt。
+
 **工具面与 gline 对齐：run/grep/glob + bash-first（2026-11-07，全量测试 + race 绿，已推送）**：
 - 新包 **`shell/`**：bash-first 解析器（Windows 找 Git Bash、跳过 WSL stub，无 bash 才 `cmd /C`；Unix `bash`→`sh`）+ 共享执行器 `Run(ctx, Spec) → Result`（默认 120s/上限 600s、超时杀进程树 taskkill /F /T + WaitDelay、stdout/stderr 分离、各 32KB 头 3/4+尾 1/4 截断 rune 安全、非 0 退出码=结果）+ `IsDestructiveCommand`/`IsNetworkCommand` + `HideConsole`（GUI 宿主不闪黑窗）。宿主（如 ltedu desktop）可直调 `shell.Run`，不再自建 exec 路径。
 - **工具重命名**：`read_file/write_to_file/replace_in_file/list_files/search_files/execute_command` → **`read/write/edit/ls/grep/run`**；新增 **`glob`**（fd 快路径+纯 Go 回落）与 grep 的 **ripgrep 快路径**（达上限杀扫描）；`list_code_definition_names` 保留实现但不再注册（对齐 gline 2026-09-21 修剪），CAPABILITIES 段同步重写。

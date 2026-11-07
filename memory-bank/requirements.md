@@ -10,7 +10,7 @@
 
 ## 1. 项目定位
 
-**cobot** 是一个**纯 Go、零第三方运行时依赖**的 Agent SDK，从 gline
+**cobot** 是一个**纯 Go（无 CGO）的 Agent 基础框架/SDK**（2026-11-07 修订：原「零第三方运行时依赖」定位作废——依赖只须纯 Go，用于默认能力层，如 docparse 文档解析），从 gline
 （`C:/Users/22569/Documents/20-Projects/gline`，Cline 血统）的
 `internal/agent` 模块提取重构而来，发布为独立 GitHub 包：
 

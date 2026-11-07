@@ -2,6 +2,7 @@
 
 ## What Works
 
+- [x] 解析层抽出 + read 合并文档提取（2026-11-07 二轮）：新公共包 `docparse/`（自 ltedu knowledge 迁入，KB 导入改调它）；`read` 经 docparse 抽文本后行分页（text extracted 头标注 / ErrNoTextLayer 友好提示 / 64MB 提取上限）；依赖政策修订（纯 Go 第三方 gopdf/striprtf/word-extractor/xls，零依赖表述作废——README/requirements/techContext 已改）；9 包测试绿
 - [x] 工具面与 gline 对齐（2026-11-07）：新 `shell/` 包（bash-first 解析 + 共享 Run 执行器 + 审批启发式）；
       重命名 read/write/edit/ls/grep/run + 新增 glob（fd 快路径）与 grep 的 rg 快路径；run 带
       `SetApprovalHandler` 审批钩子（fail-closed）；合并时保留 cobot 独有加固（原子写/500 条截断/

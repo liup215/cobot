@@ -1,6 +1,6 @@
 # cobot
 
-> A pure-Go, zero-third-party-dependency agent SDK — extracted and refactored from gline (of Cline lineage) so projects like Maestro can drive an LLM agent in-process.
+> A pure-Go (CGO-free) agent foundation framework — extracted and refactored from gline (of Cline lineage) so projects like Maestro and LTEDU can drive an LLM agent in-process. Ships a default tool set (read/grep/glob/run/…) plus reusable capability layers (the shell executor, the docparse document parser). Dependency policy: third-party libraries are pure Go only (gopdf/striprtf/word-extractor/xls, all for document parsing) — the old "zero dependencies" claim is retired.
 
 [![Release](https://img.shields.io/github/v/tag/liup215/cobot?label=release&sort=semver)](https://github.com/liup215/cobot/releases/tag/v0.1.0)
 [![Go](https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev)
@@ -189,7 +189,7 @@ behavior below is pinned by tests (`tools/behavior_test.go`):
 
 | Tool | Finalized behavior |
 |---|---|
-| `read` | Line-paged reads: 1000 lines by default, `limit` up to 2000 lines, 50KB byte cap per chunk (truncated with a `[Chunk truncated … Continue with line_number=N]` pointer, rune-boundary safe); `~` expansion and relative paths made absolute; image files return metadata instead of binary |
+| `read` | Line-paged reads: 1000 lines by default, `limit` up to 2000 lines, 50KB byte cap per chunk (truncated with a `[Chunk truncated … Continue with line_number=N]` pointer, rune-boundary safe); `~` expansion and relative paths made absolute; **document extraction (docparse registry)**: PDF/Word (incl. .doc)/Excel (incl. .xls)/PPT/ODF/RTF/HTML/EPUB are text-extracted before paging (header notes `text extracted from …`, `line_number` indexes the extracted text), zips return an entry listing, binaries with no text layer get a friendly notice instead of garbage; image files return metadata instead of binary |
 | `write` | Atomic write: same-directory temp file + `rename`, preserving the original file mode; a failed write never destroys the original. Creates directories as needed |
 | `edit` | All blocks are applied in memory first; any `search` mismatch → the file is left untouched and the failing block is named (all-or-nothing); the result is written back atomically |
 | `run` | **Shell resolution prefers bash** (finds Git Bash on Windows, WSL stubs skipped; `cmd /C` only as fallback; `bash`→`sh` on Unix), with the syntax hint baked into the tool description; foreground, blocking, default timeout 120s (per-call `timeout`, capped at 600s); on timeout the whole process tree is killed (`taskkill /F /T` + `WaitDelay` backstop on Windows); stdout/stderr captured separately, each truncated at 32KB (head 3/4 + tail 1/4 + marker, rune-boundary safe); a non-zero exit code is a result, not an error; `requires_approval` or destructive commands go through the approval hook (`SetApprovalHandler`, fail-closed). Not for long-running services |
