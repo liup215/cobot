@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,12 +88,50 @@ func headBytes(b []byte) []byte {
 	return b
 }
 
-// imageExts marks extensions treated as image files: their bytes cannot be
-// returned as text, so the tool reports metadata instead of binary garbage.
-var imageExts = map[string]bool{
-	".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
-	".webp": true, ".bmp": true, ".svg": true, ".ico": true,
-	".tiff": true, ".tif": true, ".heic": true,
+// visionImageMimes lists the raster formats mainstream vision APIs accept as
+// image_url parts (OpenAI/Anthropic: png, jpeg, webp, gif). Everything else
+// (bmp/tiff/heic/ico/avif) cannot be shown to a model and reports metadata.
+var visionImageMimes = map[string]bool{
+	"image/png": true, "image/jpeg": true, "image/webp": true, "image/gif": true,
+}
+
+// nonVisionImageExts covers image formats that either sniff as generic
+// binary (tiff/heic/avif) or must be recognized by name. None of them are
+// accepted by mainstream vision APIs, so read reports metadata for them.
+// SVG is deliberately absent: it sniffs as text and takes the text path
+// (its source is genuinely readable).
+var nonVisionImageExts = map[string]bool{
+	".bmp": true, ".tiff": true, ".tif": true, ".ico": true,
+	".heic": true, ".heif": true, ".avif": true,
+}
+
+// maxVisionImageBytes mirrors the provider-side pipeline cap: larger images
+// would be dropped with an "[image unavailable]" breadcrumb at request time,
+// so read reports metadata up front instead of pretending to attach them.
+const maxVisionImageBytes = 10 << 20
+
+// classifyImage decides how read treats a file: content-sniffed first (a
+// renamed file still routes correctly), extension only for unrecognized
+// binaries. Returns "vision" (attach pixels), "image" (metadata only) or
+// "" (not an image → the normal text/document path).
+func classifyImage(path string, head []byte) string {
+	mime := http.DetectContentType(head)
+	if strings.HasPrefix(mime, "image/") {
+		if visionImageMimes[mime] {
+			return "vision"
+		}
+		return "image" // bmp/ico: real images, not vision-acceptable
+	}
+	// Readable content wins over the extension: SVG and text files hiding
+	// behind an image name go down the text path.
+	if strings.HasPrefix(mime, "text/") || strings.HasPrefix(mime, "application/xml") {
+		return ""
+	}
+	// Unrecognized binary: trust a known non-vision image extension.
+	if nonVisionImageExts[strings.ToLower(filepath.Ext(path))] {
+		return "image"
+	}
+	return ""
 }
 
 // expandPath resolves a leading ~/ to the user's home directory.
@@ -147,7 +186,8 @@ func NewReadFileTool() *ReadFileTool {
 				fmt.Sprintf("Reads %d lines by default starting at line_number; pass limit for more (max %d per read). ", readFileChunkLines, readFileMaxLines) +
 				"Documents (PDF, Word incl. .doc, Excel incl. .xls, PowerPoint, OpenDocument, RTF, HTML, EPUB) have their " +
 				"text extracted automatically before paging — line_number works on the extracted text; a zip bundle " +
-				"returns its entry listing. Images and files with no text layer report metadata/a notice instead of " +
+				"returns its entry listing. Vision images (png/jpg/webp/gif) are returned as the image itself so you " +
+				"can see them; other image formats and files with no text layer report metadata/a notice instead of " +
 				"content — do not retry those. " +
 				"Output reports the line range, total line count and the next line_number to continue from. " +
 				"For large files, use grep first to find a relevant section, then read that chunk with line_number. " +
@@ -189,13 +229,29 @@ func (t *ReadFileTool) Execute(ctx context.Context, input json.RawMessage) (stri
 		return "", fmt.Errorf("path is a directory, not a file: %s (use ls or glob to explore it)", path)
 	}
 
-	// Image files: binary content cannot be returned as text — report
-	// metadata instead of returning base64 garbage that would flood context.
+	// Image handling (content-sniffed): vision-capable rasters are emitted as
+	// an [image: <path>] marker — the host provider converts it into an image
+	// part so the model sees the pixels (the same pipeline as chat
+	// attachments). Other image formats report metadata; SVG falls through to
+	// the text path because its XML source is readable.
 	ext := strings.ToLower(filepath.Ext(path))
-	if imageExts[ext] {
-		return fmt.Sprintf("[Image file: %s (%s, %s). Image content cannot be displayed yet. "+
-			"If you need its pixels, process it via run (e.g. a script); otherwise ask the user to describe it.]",
-			path, strings.TrimPrefix(ext, "."), formatBytes(int(info.Size()))), nil
+	head := make([]byte, 512)
+	if hf, err := os.Open(path); err == nil {
+		n, _ := hf.Read(head)
+		head = head[:n]
+		hf.Close()
+	}
+	switch classifyImage(path, head) {
+	case "vision":
+		if info.Size() > maxVisionImageBytes {
+			return fmt.Sprintf("[Image file: %s (%s, %s) — too large for the vision pipeline (limit %d MB). Ask the user for a smaller copy or resize it with run.]",
+				path, ext, formatBytes(int(info.Size())), maxVisionImageBytes>>20), nil
+		}
+		return fmt.Sprintf("[image: %s]\nImage file: %s (%s, %s). The image itself is attached for vision models.",
+			path, filepath.Base(path), ext, formatBytes(int(info.Size()))), nil
+	case "image":
+		return fmt.Sprintf("[Image file: %s (%s, %s). This format cannot be sent to vision models (supported: png/jpg/webp/gif) — ask the user for a png/jpg copy, or extract metadata with run.]",
+			path, ext, formatBytes(int(info.Size()))), nil
 	}
 
 	// Read file

@@ -161,7 +161,7 @@ agent, _ := cobot.NewAgent(cobot.Config{
 
 | 工具 | 行为定稿 |
 |---|---|
-| `read` | 按行分页读取：默认 1000 行、`limit` 上限 2000 行、块字节上限 50KB（超出截断并附 `[Chunk truncated … Continue with line_number=N]` 指路，rune 边界安全）；`~` 展开、相对路径绝对化；**文档提取（docparse 注册表）**：PDF/Word(含 .doc)/Excel(含 .xls)/PPT/ODF/RTF/HTML/EPUB 自动抽文本后按行分页（头标注 `text extracted from …`，`line_number` 作用于提取文本），zip 返回条目清单，无文本层二进制返回友好提示（不吐垃圾）；图片文件返回元数据而非二进制 |
+| `read` | 按行分页读取：默认 1000 行、`limit` 上限 2000 行、块字节上限 50KB（超出截断并附 `[Chunk truncated … Continue with line_number=N]` 指路，rune 边界安全）；`~` 展开、相对路径绝对化；**文档提取（docparse 注册表）**：PDF/Word(含 .doc)/Excel(含 .xls)/PPT/ODF/RTF/HTML/EPUB 自动抽文本后按行分页（头标注 `text extracted from …`，`line_number` 作用于提取文本），zip 返回条目清单，无文本层二进制返回友好提示（不吐垃圾）；**图片（内容嗅探）**：png/jpg/webp/gif 返回 `[image: path]` 标记（宿主转成视觉部件，模型直接看图），bmp/tiff/heic/ico 等非视觉格式与 >10MB 返回元数据，SVG 走文本路径读源码 |
 | `write` | 原子写：同目录临时文件 + `rename`，保留原文件 mode；写失败不破坏原文件。自动创建目录 |
 | `edit` | 所有块先在内存中应用，任一 `search` 失配 → 整文件不动并点名失败块（all-or-nothing）；结果同样原子写回 |
 | `run` | **shell 解析优先 bash**（Windows 找 Git Bash、跳过 WSL stub，找不到才 `cmd /C`，Unix `bash`→`sh`），语法提示烘进工具描述；前台阻塞，默认超时 120s（`timeout` 按调用覆盖，上限 600s）；超时杀整个进程树（Windows `taskkill /F /T` + `WaitDelay` 兜底）；stdout/stderr 分离采集，各截断 32KB（保头 3/4 + 尾 1/4 + 标记，rune 边界安全）；非 0 退出码是结果不是错误；`requires_approval` 或破坏性命令走审批钩子（`SetApprovalHandler`，fail-closed）。不用于长驻服务 |

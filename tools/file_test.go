@@ -282,11 +282,12 @@ func TestReadFileTool_EmptyAndImage(t *testing.T) {
 	}
 
 	img := filepath.Join(dir, "pic.png")
-	_ = os.WriteFile(img, []byte{0x89, 'P', 'N', 'G', 0x00, 0x01}, 0644)
+	// Real PNG signature so content sniffing classifies it as a vision image.
+	_ = os.WriteFile(img, append([]byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}, 0, 0, 0, 0), 0644)
 	input, _ = json.Marshal(map[string]string{"path": img})
 	result, err = tool.Execute(context.Background(), input)
-	if err != nil || !strings.Contains(result, "Image file") || !strings.Contains(result, "png") {
-		t.Errorf("expected image metadata notice, got: %q, err=%v", result, err)
+	if err != nil || !strings.Contains(result, "[image: "+img) || !strings.Contains(result, "attached for vision") {
+		t.Errorf("expected vision marker for a png, got: %q, err=%v", result, err)
 	}
 	if strings.Contains(result, "\x89PNG") {
 		t.Errorf("binary content must not leak into output")

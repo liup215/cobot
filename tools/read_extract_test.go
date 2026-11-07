@@ -126,31 +126,16 @@ func TestReadExtractsLegacyDOC(t *testing.T) {
 	}
 }
 
-// TestReadBinaryNotices: images keep gline's metadata notice; unknown
-// binaries return the docparse no-text-layer notice as a RESULT (the model
-// must not retry) — never binary garbage in either case.
+// TestReadBinaryNotices: unknown binaries return the docparse no-text-layer
+// notice as a RESULT (the model must never retry) — never binary garbage.
+// Vision/non-vision image classification lives in read_image_test.go.
 func TestReadBinaryNotices(t *testing.T) {
 	dir := t.TempDir()
-	png := filepath.Join(dir, "pic.png")
-	if err := os.WriteFile(png, append([]byte("\x89PNG\r\n\x1a\n"), 0x00, 0x01, 0x02), 0644); err != nil {
-		t.Fatal(err)
-	}
-	out, err := runReadTool(t, map[string]any{"path": png})
-	if err != nil {
-		t.Fatalf("read png: %v", err)
-	}
-	if !strings.Contains(out, "[Image file:") {
-		t.Errorf("image metadata notice missing: %q", out)
-	}
-	if strings.Contains(out, "\x89PNG") {
-		t.Error("raw image bytes leaked into the result")
-	}
-
 	blob := filepath.Join(dir, "blob.dat")
 	if err := os.WriteFile(blob, []byte{0x00, 0xFF, 0xFE, 0x01, 0x02, 0x03}, 0644); err != nil {
 		t.Fatal(err)
 	}
-	out, err = runReadTool(t, map[string]any{"path": blob})
+	out, err := runReadTool(t, map[string]any{"path": blob})
 	if err != nil {
 		t.Fatalf("read blob: %v", err)
 	}
