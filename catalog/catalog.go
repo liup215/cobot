@@ -29,7 +29,10 @@
 // per model (DefaultMaxOutputTokens when unknown).
 package catalog
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 // Defaults mirror pi's documented models.json semantics: a model without a
 // known context window is assumed to have DefaultContextWindow tokens, and
@@ -161,6 +164,30 @@ func FindModelAnywhere(modelID string) (string, Model, bool) {
 		}
 	}
 	return "", m, false
+}
+
+// Adopt finds the vendor owning a saved endpoint the pi way: legacy or
+// vendor-less entries carry only a model id and a base URL, and adopt the
+// vendor whose catalog contains that model AND whose default endpoint
+// matches (trailing-slash insensitive). Same model id on a different
+// endpoint is a custom configuration and adopts nothing.
+func Adopt(modelID, baseURL string) (Vendor, bool) {
+	if modelID == "" {
+		return Vendor{}, false
+	}
+	norm := func(u string) string { return strings.TrimRight(u, "/") }
+	target := norm(baseURL)
+	for _, v := range builtinVendors {
+		if norm(v.BaseURL) != target {
+			continue
+		}
+		for _, m := range v.Models {
+			if m.ID == modelID {
+				return v, true
+			}
+		}
+	}
+	return Vendor{}, false
 }
 
 // ResolveContextWindow resolves a model's context budget the way pi does:

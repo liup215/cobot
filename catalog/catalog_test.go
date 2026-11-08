@@ -124,3 +124,31 @@ func TestVendorsReturnsCopies(t *testing.T) {
 		t.Fatal("mutating a returned vendor leaked into the shared catalog")
 	}
 }
+
+// Adopt = vendor attribution by model id + endpoint (legacy entries carry
+// only those two facts — the pi-style reference migration depends on it).
+func TestAdopt(t *testing.T) {
+	ds, ok := Lookup("deepseek")
+	if !ok || len(ds.Models) == 0 {
+		t.Fatal("deepseek catalog missing")
+	}
+	m := ds.Models[0]
+
+	if v, ok := Adopt(m.ID, ds.BaseURL); !ok || v.Name != "deepseek" {
+		t.Errorf("exact endpoint adopt failed: %q %v", v.Name, ok)
+	}
+	// Trailing slash must not matter.
+	if v, ok := Adopt(m.ID, ds.BaseURL+"/"); !ok || v.Name != "deepseek" {
+		t.Errorf("trailing-slash adopt failed: %q %v", v.Name, ok)
+	}
+	// Same model on a DIFFERENT endpoint stays custom.
+	if _, ok := Adopt(m.ID, "https://proxy.example/v1"); ok {
+		t.Error("different endpoint must not adopt a vendor")
+	}
+	if _, ok := Adopt("no-such-model", ds.BaseURL); ok {
+		t.Error("unknown model must not adopt")
+	}
+	if _, ok := Adopt("", ""); ok {
+		t.Error("empty input must not adopt")
+	}
+}
