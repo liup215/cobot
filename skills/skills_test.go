@@ -2,9 +2,12 @@ package skills
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeSkill creates <root>/<name>/SKILL.md with the given body and returns
@@ -272,5 +275,125 @@ func TestSectionFoldsMultilineDescription(t *testing.T) {
 	}
 	if !strings.Contains(got, "- s: line one line two") {
 		t.Errorf("description should be folded, got:\n%s", got)
+	}
+}
+
+// ─── symlink / junction roots (shared skill store) ──────────────────────────
+
+// linkDir creates link → target: a real symlink where the platform allows it
+// (Unix always, Windows with Developer Mode), falling back to a directory
+// junction on Windows (no privilege required). Skips the test if neither
+// works.
+func linkDir(t *testing.T, target, link string) {
+	t.Helper()
+	err := os.Symlink(target, link)
+	if err == nil {
+		return
+	}
+	if runtime.GOOS == "windows" {
+		out, jerr := exec.Command("cmd", "/C", "mklink", "/J", filepath.FromSlash(link), filepath.FromSlash(target)).CombinedOutput()
+		if jerr == nil {
+			return
+		}
+		t.Skipf("cannot create symlink or junction: symlink=%v junction=%v (%s)", err, jerr, out)
+	}
+	t.Skipf("cannot create symlink: %v", err)
+}
+
+// The whole root being a link to a shared store (the pi-agent convention:
+// ~/.ltedu-agent/skills → ~/.agents/skills) must discover the linked skills.
+// filepath.WalkDir Lstats its root and stops at a link — this pins the
+// os.Stat-based walker against that regression.
+func TestDiscoverThroughLinkedRoot(t *testing.T) {
+	real := t.TempDir()
+	writeSkill(t, real, "shared-skill", "---\ndescription: Lives in the shared store.\n---\nbody\n")
+	writeSkill(t, real, "outer", "---\ndescription: Outer.\n---\nbody\n")
+	writeSkill(t, filepath.Join(real, "outer"), "inner", "---\ndescription: Nested inside outer.\n---\nbody\n")
+
+	linkRoot := filepath.Join(t.TempDir(), "skills")
+	linkDir(t, real, linkRoot)
+
+	got, err := Discover(linkRoot)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	var names []string
+	for _, s := range got {
+		names = append(names, s.Name)
+	}
+	want := "inner,outer,shared-skill"
+	if strings.Join(names, ",") != want {
+		t.Errorf("linked-root discovery = %v, want [%s]", names, want)
+	}
+	// Paths stay under the link root (what the model will read), not the
+	// resolved target.
+	for _, s := range got {
+		if !strings.HasPrefix(s.Path, linkRoot) {
+			t.Errorf("skill %s path = %q, want prefix %q", s.Name, s.Path, linkRoot)
+		}
+	}
+}
+
+// A symlinked subdirectory INSIDE a real root (individual skills linked into
+// the store) is entered too — same Stat-based classification.
+func TestDiscoverThroughLinkedSubdir(t *testing.T) {
+	root := t.TempDir()
+	external := t.TempDir()
+	writeSkill(t, external, "linked-in", "---\ndescription: Linked into the root.\n---\nbody\n")
+	if err := os.Symlink(external, filepath.Join(root, "linked-in")); err != nil {
+		if runtime.GOOS == "windows" {
+			out, jerr := exec.Command("cmd", "/C", "mklink", "/J",
+				filepath.Join(root, "linked-in"), external).CombinedOutput()
+			if jerr != nil {
+				t.Skipf("cannot create symlink or junction: %v / %v (%s)", err, jerr, out)
+			}
+		} else {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+	}
+
+	got, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "linked-in" {
+		t.Fatalf("got %d skills, want the linked-in one", len(got))
+	}
+}
+
+// A link cycle must terminate instead of walking forever (depth cap +
+// visited-set; EvalSymlinks cannot see Windows junction loops).
+func TestDiscoverLinkCycleTerminates(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "a", "---\ndescription: A.\n---\nbody\n")
+	// a/loop → root: descending a/loop reaches root again.
+	loop := filepath.Join(root, "a", "loop")
+	if err := os.Symlink(root, loop); err != nil {
+		if runtime.GOOS == "windows" {
+			if out, jerr := exec.Command("cmd", "/C", "mklink", "/J", loop, root).CombinedOutput(); jerr != nil {
+				t.Skipf("cannot create cycle link: %v / %v (%s)", err, jerr, out)
+			}
+		} else {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+	}
+
+	done := make(chan struct{})
+	var got []Skill
+	var derr error
+	go func() {
+		got, derr = Discover(root)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Discover did not terminate on a link cycle")
+	}
+	if derr != nil {
+		t.Fatalf("Discover: %v", derr)
+	}
+	if len(got) != 1 || got[0].Name != "a" {
+		t.Errorf("cycle walk found %d skills, want just [a] (no duplicates)", len(got))
 	}
 }

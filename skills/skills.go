@@ -87,6 +87,11 @@ func ParseSKILL(path string) (Skill, error) {
 // prompt. Invalid files are skipped; duplicate names keep the first
 // occurrence across roots, so ordering the roots user-first gives user
 // skills precedence over bundled ones.
+//
+// A root may itself be a symlink or junction (the shared-store setup:
+// ~/.ltedu-agent/skills → ~/.agents/skills, the pi-agent convention) and
+// nested directories may be links too — every entry is classified with
+// os.Stat (which follows links), never Lstat/DirEntry.IsDir.
 func Discover(roots ...string) ([]Skill, error) {
 	seen := make(map[string]bool)
 	var out []Skill
@@ -105,21 +110,7 @@ func Discover(roots ...string) ([]Skill, error) {
 			}
 			continue
 		}
-		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return nil // unreadable entry: skip, keep walking
-			}
-			if d.IsDir() {
-				// Skip hidden directories (.git, .builtin, ...) — a skill
-				// never lives inside one and the walk would be pointless.
-				if strings.HasPrefix(d.Name(), ".") && path != root {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if d.Name() != "SKILL.md" {
-				return nil
-			}
+		err := walkSkills(root, func(path string) error {
 			skill, perr := ParseSKILL(path)
 			if perr != nil {
 				return nil // malformed skill: skip silently (spec behavior)
@@ -138,6 +129,71 @@ func Discover(roots ...string) ([]Skill, error) {
 
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, firstErr
+}
+
+// maxSkillDepth bounds the discovery walk. Skill trees are two levels deep
+// (root/skill/SKILL.md); the cap exists purely so a symlink cycle — a
+// junction loop that EvalSymlinks cannot see, since Go reports Windows
+// junctions as neither symlink nor dir via Lstat — terminates instead of
+// walking forever.
+const maxSkillDepth = 16
+
+// walkSkills recursively visits SKILL.md files under dir.
+//
+// Unlike filepath.WalkDir it classifies every entry with os.Stat (which
+// follows symlinks). WalkDir Lstats its root, sees "not a directory" for a
+// symlink/junction root, and stops — which silently finds zero skills when
+// the whole root is a link to a shared store.
+//
+// Hidden directories (.git, ...) are skipped at every level below the root;
+// unreadable entries are skipped rather than aborting the walk.
+func walkSkills(dir string, visit func(path string) error) error {
+	visited := make(map[string]bool)
+
+	var walk func(dir string, depth int) error
+	walk = func(dir string, depth int) error {
+		if depth > maxSkillDepth {
+			return nil
+		}
+		// Cycle guard: resolve the directory once and never enter the same
+		// real directory twice within one walk. Best effort — on Windows
+		// junctions EvalSymlinks returns the link path unchanged, in which
+		// case the depth cap above is what terminates the loop.
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			if visited[real] {
+				return nil
+			}
+			visited[real] = true
+		}
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil // unreadable directory: skip, keep the rest of the walk
+		}
+		for _, e := range entries {
+			path := filepath.Join(dir, e.Name())
+			fi, err := os.Stat(path) // follows links: dir-symlinks enter, broken links skip
+			if err != nil {
+				continue
+			}
+			if fi.IsDir() {
+				if strings.HasPrefix(e.Name(), ".") {
+					continue // hidden directory (.git, .builtin, ...)
+				}
+				if err := walk(path, depth+1); err != nil {
+					return err
+				}
+				continue
+			}
+			if e.Name() == "SKILL.md" {
+				if err := visit(path); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return walk(dir, 0)
 }
 
 // Section renders the SKILLS system-prompt section for the advertised skills
