@@ -99,15 +99,17 @@ func CreateDefault(name string, config ProviderConfig) (Provider, error) {
 // InitDefaultRegistry initializes the default registry with built-in providers
 func InitDefaultRegistry() {
 	// Register OpenAI-compatible provider
-	// Supports OpenAI, OpenRouter, and any OpenAI-compatible API
+	// Supports OpenAI, OpenRouter, and any OpenAI-compatible API.
+	// The full ProviderConfig flows through (headers, dynamic-header hook,
+	// content transform, default output cap, stream-usage opt-out).
 	RegisterDefault("openai", func(config ProviderConfig) (Provider, error) {
-		return NewOpenAIProvider(config.APIKey, config.Model, config.BaseURL), nil
+		return NewOpenAIProviderFromConfig(config), nil
 	})
 
 	// Register native Anthropic Messages provider (Claude models).
 	// An empty API key falls back to the ANTHROPIC_API_KEY env var.
 	RegisterDefault("anthropic", func(config ProviderConfig) (Provider, error) {
-		return NewAnthropicProvider(config.APIKey, config.Model, config.BaseURL), nil
+		return NewAnthropicProviderFromConfig(config), nil
 	})
 }
 

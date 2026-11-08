@@ -160,7 +160,8 @@ type ProviderConfig struct {
 	// BaseURL is the base URL for the API (optional, for custom endpoints)
 	BaseURL string
 
-	// MaxTokens is the maximum tokens to generate
+	// MaxTokens is the default maximum tokens to generate per request, used
+	// when the request itself carries no value.
 	MaxTokens int
 
 	// Temperature controls randomness
@@ -168,6 +169,29 @@ type ProviderConfig struct {
 
 	// Timeout is the request timeout in seconds
 	Timeout int
+
+	// Headers are static extra headers applied to every request (custom
+	// gateways, User-Agent overrides, vendor-required metadata). Applied
+	// last, so they win over DynamicHeaders on key conflicts.
+	Headers map[string]string
+
+	// DynamicHeaders is consulted once per request for header values that
+	// rotate with host state (e.g. OpenCode's per-conversation
+	// x-opencode-session id). nil = no dynamic headers.
+	DynamicHeaders func() map[string]string
+
+	// ContentTransform converts a stored message string into the provider's
+	// wire "content" value at request time. The host uses it to interpret
+	// markers its own tools emit (the read tool's [image: path] markers
+	// become multimodal parts for vision models). role is the message role
+	// ("system"|"user"|"assistant"|"tool"). nil = content sent verbatim.
+	// Currently honored by the OpenAI-compatible provider.
+	ContentTransform func(content, role string) interface{}
+
+	// NoStreamUsage disables the stream_options.include_usage request field
+	// for OpenAI-compatible streaming. Default (false) requests real usage
+	// on the final stream chunk; set it for gateways that reject the field.
+	NoStreamUsage bool
 }
 
 // DefaultProviderConfig returns a default provider configuration

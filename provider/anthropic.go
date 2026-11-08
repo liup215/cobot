@@ -80,6 +80,12 @@ type AnthropicProvider struct {
 	baseURL    string
 	version    string
 	httpClient *http.Client
+
+	// headers / dynamicHeaders mirror the OpenAI provider: static config
+	// headers applied last (they win), consulted-per-request values for
+	// gateway quirks like session ids.
+	headers        map[string]string
+	dynamicHeaders func() map[string]string
 }
 
 // NewAnthropicProvider creates a new Anthropic Messages provider.
@@ -120,6 +126,16 @@ func NewAnthropicProvider(apiKey, model, baseURL string) *AnthropicProvider {
 
 // GetModel returns the current model name.
 func (p *AnthropicProvider) GetModel() string { return p.model }
+
+// NewAnthropicProviderFromConfig builds an Anthropic provider from the shared
+// ProviderConfig (headers and dynamic headers honored; ContentTransform is
+// OpenAI-wire-specific and not applied here).
+func NewAnthropicProviderFromConfig(config ProviderConfig) *AnthropicProvider {
+	p := NewAnthropicProvider(config.APIKey, config.Model, config.BaseURL)
+	p.headers = config.Headers
+	p.dynamicHeaders = config.DynamicHeaders
+	return p
+}
 
 // GetProviderName returns the provider name.
 func (p *AnthropicProvider) GetProviderName() string { return "anthropic" }
@@ -202,6 +218,20 @@ func (p *AnthropicProvider) post(ctx context.Context, body []byte) (*http.Respon
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-api-key", p.apiKey)
 	httpReq.Header.Set("anthropic-version", p.version)
+	// Per-request dynamic headers first, then static config headers
+	// (config wins on key conflicts) — same order as the OpenAI provider.
+	if p.dynamicHeaders != nil {
+		for k, v := range p.dynamicHeaders() {
+			if k != "" && v != "" {
+				httpReq.Header.Set(k, v)
+			}
+		}
+	}
+	for k, v := range p.headers {
+		if k != "" {
+			httpReq.Header.Set(k, v)
+		}
+	}
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {

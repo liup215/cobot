@@ -97,12 +97,38 @@ type OpenAIProvider struct {
 	model      string
 	baseURL    string
 	httpClient *http.Client
+
+	// headers are static extra headers applied to every request (config
+	// headers, User-Agent overrides). Applied last so they win over
+	// dynamicHeaders on key conflicts.
+	headers map[string]string
+
+	// dynamicHeaders is consulted per request for gateway values that
+	// rotate with conversation state (e.g. x-opencode-session).
+	dynamicHeaders func() map[string]string
+
+	// contentTransform lets the host convert stored marker text (the read
+	// tool's [image: path] markers) into multimodal content parts.
+	// nil = message content is sent verbatim.
+	contentTransform func(content, role string) interface{}
+
+	// defaultMaxTokens is the output cap applied when a request carries
+	// none (0 = 4096).
+	defaultMaxTokens int
+
+	// noStreamUsage opts out of stream_options.include_usage for gateways
+	// that reject the field.
+	noStreamUsage bool
 }
 
-// OpenAIMessage represents a message in OpenAI's format
+// OpenAIMessage represents a message in OpenAI's format.
+//
+// Content is interface{} because requests may carry multimodal content
+// parts (host content transform) while responses normally carry a string
+// — decode with contentText when a plain string is needed.
 type OpenAIMessage struct {
 	Role             string           `json:"role"`
-	Content          string           `json:"content"`
+	Content          interface{}      `json:"content"`
 	ReasoningContent string           `json:"reasoning_content,omitempty"`
 	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string           `json:"tool_call_id,omitempty"`
@@ -137,13 +163,22 @@ type OpenAIToolFunction struct {
 
 // OpenAIRequest represents the request body for OpenAI API
 type OpenAIRequest struct {
-	Model       string          `json:"model"`
-	Messages    []OpenAIMessage `json:"messages"`
-	Tools       []OpenAITool    `json:"tools,omitempty"`
-	ToolChoice  interface{}     `json:"tool_choice,omitempty"`
-	Temperature float64         `json:"temperature,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
+	Model         string                `json:"model"`
+	Messages      []OpenAIMessage       `json:"messages"`
+	Tools         []OpenAITool          `json:"tools,omitempty"`
+	ToolChoice    interface{}           `json:"tool_choice,omitempty"`
+	Temperature   float64               `json:"temperature,omitempty"`
+	MaxTokens     int                   `json:"max_tokens,omitempty"`
+	Stream        bool                  `json:"stream,omitempty"`
+	StreamOptions *OpenAIStreamOptions  `json:"stream_options,omitempty"`
+}
+
+// OpenAIStreamOptions carries streaming request options. IncludeUsage asks
+// the server to report token usage on a final chunk with empty choices —
+// without it, strict OpenAI-compatible endpoints never report usage and the
+// loop falls back to token estimation.
+type OpenAIStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // OpenAIResponse represents the response from OpenAI API
@@ -250,13 +285,93 @@ func NewOpenAIProvider(apiKey, model, baseURL string) *OpenAIProvider {
 	}
 }
 
-// CreateMessage sends a message to the OpenAI-compatible API
-func (p *OpenAIProvider) CreateMessage(ctx context.Context, req *MessageRequest) (*MessageResponse, error) {
-	if p.apiKey == "" {
-		return nil, fmt.Errorf("API key is required")
-	}
+// NewOpenAIProviderFromConfig builds an OpenAI-compatible provider from the
+// shared ProviderConfig, including host hooks (headers, dynamic headers,
+// content transform) and defaults.
+func NewOpenAIProviderFromConfig(config ProviderConfig) *OpenAIProvider {
+	p := NewOpenAIProvider(config.APIKey, config.Model, config.BaseURL)
+	p.headers = config.Headers
+	p.dynamicHeaders = config.DynamicHeaders
+	p.contentTransform = config.ContentTransform
+	p.defaultMaxTokens = config.MaxTokens
+	p.noStreamUsage = config.NoStreamUsage
+	return p
+}
 
-	// Convert messages to OpenAI format
+// contentText renders a decoded OpenAI "content" value as plain text.
+// Servers normally return a string; array-of-parts content (vision) is
+// flattened to its text parts.
+func contentText(v interface{}) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	case []interface{}:
+		var b strings.Builder
+		for _, part := range t {
+			if m, ok := part.(map[string]interface{}); ok {
+				if txt, ok := m["text"].(string); ok {
+					b.WriteString(txt)
+					b.WriteByte('\n')
+				}
+			}
+		}
+		return b.String()
+	default:
+		return fmt.Sprintf("%v", t)
+	}
+}
+
+// contentFor applies the host content transform (marker → parts) for a
+// message; without a transform the stored string goes on the wire as-is.
+func (p *OpenAIProvider) contentFor(content, role string) interface{} {
+	if p.contentTransform == nil {
+		return content
+	}
+	return p.contentTransform(content, role)
+}
+
+// applyHeaders sets the standard headers, then dynamic per-request headers,
+// then static config headers (config wins on key conflicts).
+func (p *OpenAIProvider) applyHeaders(req *http.Request, stream bool) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	if stream {
+		req.Header.Set("Accept", "text/event-stream")
+	}
+	if p.dynamicHeaders != nil {
+		for k, v := range p.dynamicHeaders() {
+			if k != "" && v != "" {
+				req.Header.Set(k, v)
+			}
+		}
+	}
+	for k, v := range p.headers {
+		if k != "" {
+			req.Header.Set(k, v)
+		}
+	}
+}
+
+// outputCap resolves the request output cap: request value, then the
+// provider default, then 4096.
+func (p *OpenAIProvider) outputCap(reqCap int) int {
+	if reqCap > 0 {
+		return reqCap
+	}
+	if p.defaultMaxTokens > 0 {
+		return p.defaultMaxTokens
+	}
+	return 4096
+}
+
+// buildMessages converts loop messages into OpenAI wire messages. The host
+// content transform runs per message (markers → multimodal parts),
+// reasoning_content rides only on assistant messages from the current turn
+// (DeepSeek requirement), and the system prompt is prepended when present.
+// Shared by the streaming and non-streaming request paths.
+func (p *OpenAIProvider) buildMessages(req *MessageRequest) []OpenAIMessage {
 	openaiMessages := make([]OpenAIMessage, 0, len(req.Messages))
 
 	// Determine last user index so we only attach reasoning_content to assistant messages from the current turn.
@@ -269,22 +384,23 @@ func (p *OpenAIProvider) CreateMessage(ctx context.Context, req *MessageRequest)
 	}
 
 	for i, msg := range req.Messages {
+		role := string(msg.Role)
 		switch msg.Role {
 		case types.RoleSystem:
 			openaiMessages = append(openaiMessages, OpenAIMessage{
 				Role:    "system",
-				Content: msg.Content,
+				Content: p.contentFor(msg.Content, role),
 			})
 		case types.RoleUser:
 			openaiMessages = append(openaiMessages, OpenAIMessage{
 				Role:    "user",
-				Content: msg.Content,
+				Content: p.contentFor(msg.Content, role),
 			})
 		case types.RoleAssistant:
 			// Include tool calls if present - required by OpenAI API
 			openaiMsg := OpenAIMessage{
 				Role:    "assistant",
-				Content: msg.Content,
+				Content: p.contentFor(msg.Content, role),
 			}
 			// Attach reasoning_content only for assistant messages that belong to the current turn
 			// i.e., assistant messages that come after the last user message in the history.
@@ -299,23 +415,26 @@ func (p *OpenAIProvider) CreateMessage(ctx context.Context, req *MessageRequest)
 			// Tool results are sent as tool messages
 			openaiMessages = append(openaiMessages, OpenAIMessage{
 				Role:       "tool",
-				Content:    msg.Content,
+				Content:    p.contentFor(msg.Content, role),
 				ToolCallID: msg.ToolCallID,
 			})
 		}
 	}
 
-	// Add system prompt if provided
+	// Add system prompt if provided (verbatim: host transforms target
+	// conversation markers, not the system prompt).
 	if req.SystemPrompt != "" {
-		// Insert system message at the beginning
 		systemMsg := OpenAIMessage{
 			Role:    "system",
 			Content: req.SystemPrompt,
 		}
 		openaiMessages = append([]OpenAIMessage{systemMsg}, openaiMessages...)
 	}
+	return openaiMessages
+}
 
-	// Convert tools to OpenAI format
+// buildTools converts loop tool definitions into OpenAI function tools.
+func buildTools(req *MessageRequest) []OpenAITool {
 	openaiTools := make([]OpenAITool, 0, len(req.Tools))
 	for _, tool := range req.Tools {
 		openaiTools = append(openaiTools, OpenAITool{
@@ -327,13 +446,26 @@ func (p *OpenAIProvider) CreateMessage(ctx context.Context, req *MessageRequest)
 			},
 		})
 	}
+	return openaiTools
+}
+
+// CreateMessage sends a message to the OpenAI-compatible API
+func (p *OpenAIProvider) CreateMessage(ctx context.Context, req *MessageRequest) (*MessageResponse, error) {
+	if p.apiKey == "" {
+		return nil, fmt.Errorf("API key is required")
+	}
+
+	// Convert messages to OpenAI format (marker → parts transform and the
+	// turn-scoped reasoning_content rule live in the shared helper).
+	openaiMessages := p.buildMessages(req)
+	openaiTools := buildTools(req)
 
 	// Build request
 	openaiReq := OpenAIRequest{
 		Model:       p.model,
 		Messages:    openaiMessages,
 		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
+		MaxTokens:   p.outputCap(req.MaxTokens),
 	}
 
 	// Only add tools if there are any
@@ -371,8 +503,7 @@ func (p *OpenAIProvider) CreateMessage(ctx context.Context, req *MessageRequest)
 	}
 
 	// Set headers
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	p.applyHeaders(httpReq, false)
 
 	// Send request
 	logDebugf("CreateMessage: Sending HTTP request...")
@@ -425,7 +556,7 @@ func (p *OpenAIProvider) convertResponse(resp *OpenAIResponse) *MessageResponse 
 
 	choice := resp.Choices[0]
 	result := &MessageResponse{
-		Content:          choice.Message.Content,
+		Content:          contentText(choice.Message.Content),
 		ReasoningContent: choice.Message.ReasoningContent,
 		FinishReason:     choice.FinishReason,
 		Usage: TokenUsage{
@@ -496,83 +627,23 @@ func (p *OpenAIProvider) CreateMessageStream(ctx context.Context, req *MessageRe
 		return nil, fmt.Errorf("API key is required")
 	}
 
-	// Convert messages to OpenAI format
-	openaiMessages := make([]OpenAIMessage, 0, len(req.Messages))
-
-	// Determine last user index so we only attach reasoning_content to assistant messages from the current turn.
-	lastUserIndex := -1
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == types.RoleUser {
-			lastUserIndex = i
-			break
-		}
-	}
-
-	for i, msg := range req.Messages {
-		switch msg.Role {
-		case types.RoleSystem:
-			openaiMessages = append(openaiMessages, OpenAIMessage{
-				Role:    "system",
-				Content: msg.Content,
-			})
-		case types.RoleUser:
-			openaiMessages = append(openaiMessages, OpenAIMessage{
-				Role:    "user",
-				Content: msg.Content,
-			})
-		case types.RoleAssistant:
-			// Include tool calls if present - required by OpenAI API
-			openaiMsg := OpenAIMessage{
-				Role:    "assistant",
-				Content: msg.Content,
-			}
-			// Attach reasoning_content only for assistant messages that belong to the current turn
-			// i.e., assistant messages that come after the last user message in the history.
-			if i > lastUserIndex && msg.ReasoningContent != "" {
-				openaiMsg.ReasoningContent = msg.ReasoningContent
-			}
-			if len(msg.ToolCalls) > 0 {
-				openaiMsg.ToolCalls = convertToolCallsToOpenAI(msg.ToolCalls)
-			}
-			openaiMessages = append(openaiMessages, openaiMsg)
-		case types.RoleTool:
-			openaiMessages = append(openaiMessages, OpenAIMessage{
-				Role:       "tool",
-				Content:    msg.Content,
-				ToolCallID: msg.ToolCallID,
-			})
-		}
-	}
-
-	// Add system prompt if provided
-	if req.SystemPrompt != "" {
-		systemMsg := OpenAIMessage{
-			Role:    "system",
-			Content: req.SystemPrompt,
-		}
-		openaiMessages = append([]OpenAIMessage{systemMsg}, openaiMessages...)
-	}
-
-	// Convert tools to OpenAI format
-	openaiTools := make([]OpenAITool, 0, len(req.Tools))
-	for _, tool := range req.Tools {
-		openaiTools = append(openaiTools, OpenAITool{
-			Type: "function",
-			Function: OpenAIToolFunction{
-				Name:        tool.Name,
-				Description: tool.Description,
-				Parameters:  tool.InputSchema,
-			},
-		})
-	}
+	// Convert messages + tools (shared helpers; host content transform and
+	// reasoning rules included).
+	openaiMessages := p.buildMessages(req)
+	openaiTools := buildTools(req)
 
 	// Build request
 	openaiReq := OpenAIRequest{
 		Model:       p.model,
 		Messages:    openaiMessages,
 		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
+		MaxTokens:   p.outputCap(req.MaxTokens),
 		Stream:      true,
+	}
+	// Ask for real token usage on a final empty-choices chunk; opt-out for
+	// gateways that reject the stream_options field.
+	if !p.noStreamUsage {
+		openaiReq.StreamOptions = &OpenAIStreamOptions{IncludeUsage: true}
 	}
 
 	// Only add tools if there are any
@@ -601,7 +672,7 @@ func (p *OpenAIProvider) CreateMessageStream(ctx context.Context, req *MessageRe
 	// Build full URL by appending the chat completions path
 	fullURL := buildFullURL(p.baseURL)
 	logInfof("CreateMessageStream: Sending request to %s (tools=%d, tool_choice=%v)", fullURL, len(openaiReq.Tools), openaiReq.ToolChoice)
-	logDebugf("CreateMessageStream request system prompt length=%d body=%d", len(openaiReq.Messages[0].Content), len(jsonBody))
+	logDebugf("CreateMessageStream request system prompt length=%d body=%d", len(contentText(openaiReq.Messages[0].Content)), len(jsonBody))
 
 	// Create HTTP request
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewBuffer(jsonBody))
@@ -610,8 +681,7 @@ func (p *OpenAIProvider) CreateMessageStream(ctx context.Context, req *MessageRe
 	}
 
 	// Set headers
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	p.applyHeaders(httpReq, true)
 
 	// Send request
 	resp, err := p.httpClient.Do(httpReq)
@@ -716,17 +786,21 @@ func (p *OpenAIProvider) CreateMessageStream(ctx context.Context, req *MessageRe
 
 			logDebugf("Parsed stream response: ID=%s, Choices=%d", streamResp.ID, len(streamResp.Choices))
 
-			if len(streamResp.Choices) == 0 {
-				// Usage may appear in the final chunk with empty choices
-				if streamResp.Usage.TotalTokens > 0 {
-					chunkChan <- StreamChunk{
-						Usage: TokenUsage{
-							InputTokens:  streamResp.Usage.PromptTokens,
-							OutputTokens: streamResp.Usage.CompletionTokens,
-							TotalTokens:  streamResp.Usage.TotalTokens,
-						},
-					}
+			// Usage rides on a final chunk — strict OpenAI gives it empty
+			// choices (via stream_options.include_usage), other servers attach
+			// it to the last contentful chunk. Emit whenever present; the loop
+			// treats the latest report as the turn's usage.
+			if streamResp.Usage.TotalTokens > 0 {
+				chunkChan <- StreamChunk{
+					Usage: TokenUsage{
+						InputTokens:  streamResp.Usage.PromptTokens,
+						OutputTokens: streamResp.Usage.CompletionTokens,
+						TotalTokens:  streamResp.Usage.TotalTokens,
+					},
 				}
+			}
+
+			if len(streamResp.Choices) == 0 {
 				continue
 			}
 
