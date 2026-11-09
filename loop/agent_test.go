@@ -871,3 +871,28 @@ func (c *multiRecordingCallback) AskFollowupQuestionMulti(q string, o []string, 
 	c.multiAnswer = "a, b"
 	return c.multiAnswer, nil
 }
+
+// TestSetProviderSwapsBetweenRuns pins the host-side hot-swap used by
+// per-session agents after a settings change: the new provider takes effect
+// for the next run and nil is rejected.
+func TestSetProviderSwapsBetweenRuns(t *testing.T) {
+	first := &staticProvider{response: "first"}
+	a, err := New(Options{Provider: first, ToolRegistry: newTestRegistry(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if got := a.GetProvider(); got != first {
+		t.Fatalf("provider = %v, want the original", got)
+	}
+	second := &staticProvider{response: "second"}
+	if err := a.SetProvider(second); err != nil {
+		t.Fatalf("SetProvider: %v", err)
+	}
+	if got := a.GetProvider(); got != second {
+		t.Fatalf("provider not swapped: %v", got)
+	}
+	if err := a.SetProvider(nil); err == nil {
+		t.Fatal("nil provider must be rejected")
+	}
+}

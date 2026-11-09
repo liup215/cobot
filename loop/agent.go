@@ -727,6 +727,22 @@ func (a *BaseAgent) GetProvider() Provider {
 	return a.provider
 }
 
+// SetProvider swaps the LLM provider BETWEEN runs: hosts with per-session
+// agents rebuild providers after a settings change (key/endpoint/model)
+// without discarding the agent's conversation. Rejected while running — the
+// run goroutine reads a.provider freely, so hosts call this when
+// IsRunning() is false (before starting the next run).
+func (a *BaseAgent) SetProvider(p Provider) error {
+	if p == nil {
+		return fmt.Errorf("provider is nil")
+	}
+	if a.running {
+		return fmt.Errorf("cannot swap provider while running")
+	}
+	a.provider = p
+	return nil
+}
+
 // GetToolRegistry returns the tool registry
 func (a *BaseAgent) GetToolRegistry() *tools.Registry {
 	return a.toolRegistry
