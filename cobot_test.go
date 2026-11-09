@@ -66,11 +66,13 @@ func TestNewAgentEndToEnd(t *testing.T) {
 	if res == nil {
 		t.Fatal("RunWithCallback returned a nil result")
 	}
-	if res.FinalText != "all done" {
-		t.Errorf("RunResult.FinalText = %q, want the attempt_completion result", res.FinalText)
+	// pi semantics: the first turn's plain text IS the answer — the run
+	// completes there (the scripted completion turn is never reached).
+	if res.FinalText != "thinking..." {
+		t.Errorf("RunResult.FinalText = %q, want the text answer", res.FinalText)
 	}
-	if res.Turns != 2 {
-		t.Errorf("RunResult.Turns = %d, want 2", res.Turns)
+	if res.Turns != 1 {
+		t.Errorf("RunResult.Turns = %d, want 1 (text answer completes the run)", res.Turns)
 	}
 	if got := strings.Join(cb.contents, ""); got != "thinking..." {
 		t.Errorf("content = %q", got)
@@ -78,8 +80,8 @@ func TestNewAgentEndToEnd(t *testing.T) {
 	if cb.completed != 1 {
 		t.Errorf("OnComplete fired %d times, want 1", cb.completed)
 	}
-	if len(cb.starts) != 1 || cb.starts[0] != "attempt_completion" {
-		t.Errorf("tool starts = %v", cb.starts)
+	if len(cb.starts) != 0 {
+		t.Errorf("tool starts = %v, want none (text answer ends the run before tools)", cb.starts)
 	}
 }
 
