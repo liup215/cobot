@@ -876,16 +876,16 @@ func (c *multiRecordingCallback) AskFollowupQuestionMulti(q string, o []string, 
 // per-session agents after a settings change: the new provider takes effect
 // for the next run and nil is rejected.
 func TestSetProviderSwapsBetweenRuns(t *testing.T) {
-	first := &staticProvider{response: "first"}
-	a, err := New(Options{Provider: first, ToolRegistry: newTestRegistry(t)})
+	turns := []provider.TurnScript{{ToolCalls: []provider.ToolCall{completionCall("c1", "done")}}}
+	first := provider.NewScriptedProvider(turns...)
+	a, err := New(Options{Provider: first, ToolRegistry: newAttemptReg(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer a.Close()
 	if got := a.GetProvider(); got != first {
 		t.Fatalf("provider = %v, want the original", got)
 	}
-	second := &staticProvider{response: "second"}
+	second := provider.NewScriptedProvider(turns...)
 	if err := a.SetProvider(second); err != nil {
 		t.Fatalf("SetProvider: %v", err)
 	}
@@ -895,4 +895,24 @@ func TestSetProviderSwapsBetweenRuns(t *testing.T) {
 	if err := a.SetProvider(nil); err == nil {
 		t.Fatal("nil provider must be rejected")
 	}
+	// The swapped provider is the one the next run actually uses.
+	if _, err := a.RunWithCallback(context.Background(), "task", &recordingCallback{}); err != nil {
+		t.Fatalf("run after swap: %v", err)
+	}
+	if got := a.GetProvider(); got != second {
+		t.Fatalf("run reverted the provider: %v", got)
+	}
+}
+
+// newAttemptReg is a registry with the terminal tool the loop needs.
+func newAttemptReg(t *testing.T) *tools.Registry {
+	t.Helper()
+	reg := tools.NewRegistry()
+	if err := reg.Register(&tools.ToolInfo{
+		Tool:         tools.NewAttemptCompletionTool(),
+		AllowedModes: []string{"plan", "act"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return reg
 }
