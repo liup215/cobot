@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/liup215/cobot/compact"
 	"github.com/liup215/cobot/prompts"
 	"github.com/liup215/cobot/provider"
 	"github.com/liup215/cobot/tools"
@@ -20,19 +21,28 @@ import (
 
 // recordingCallback captures every callback event for assertions.
 type recordingCallback struct {
-	mu               sync.Mutex
-	contents         []string
-	reasonings       []string
-	streamStarts     int
-	toolStarts       []provider.ToolCall
-	toolCompletions  []toolCompletion
-	errors           []error
-	completed        int
-	taskCreated      []string
-	updates          []toolUpdate
-	compactionStarts []string
-	compactionEnds   []string
-	retries          []retryEvent
+	mu                sync.Mutex
+	contents          []string
+	reasonings        []string
+	streamStarts      int
+	toolStarts        []provider.ToolCall
+	toolCompletions   []toolCompletion
+	errors            []error
+	completed         int
+	taskCreated       []string
+	updates           []toolUpdate
+	compactionStarts  []string
+	compactionEnds    []string
+	compactionApplied []compact.Result
+	retries           []retryEvent
+}
+
+// OnCompactionApplied implements provider.CompactionAware — the typed
+// durable-persistence hook (summary + anchor data).
+func (c *recordingCallback) OnCompactionApplied(res compact.Result) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.compactionApplied = append(c.compactionApplied, res)
 }
 
 type toolCompletion struct {

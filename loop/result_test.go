@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/liup215/cobot/compact"
 	"github.com/liup215/cobot/provider"
 	"github.com/liup215/cobot/tools"
 	"github.com/liup215/cobot/types"
@@ -339,14 +340,14 @@ type rewriteHistoryStrategy struct{ compacted bool }
 
 func (s *rewriteHistoryStrategy) ShouldCompact(*types.Conversation) bool { return true }
 
-func (s *rewriteHistoryStrategy) Compact(_ context.Context, conv *types.Conversation) error {
+func (s *rewriteHistoryStrategy) Compact(_ context.Context, conv *types.Conversation) (compact.Result, error) {
 	msgs := conv.GetMessages()
 	if len(msgs) > 2 {
 		msgs = msgs[len(msgs)-2:]
 	}
 	conv.ReplaceMessages(msgs)
 	s.compacted = true
-	return nil
+	return compact.Result{}, nil
 }
 
 func TestRunResultAfterMidRunCompaction(t *testing.T) {

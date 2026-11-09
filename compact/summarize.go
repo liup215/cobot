@@ -162,12 +162,12 @@ func (s *Summarize) ShouldCompact(conv *types.Conversation) bool {
 
 // Compact summarizes the rounds outside the protected window and replaces
 // them with a single summary message.
-func (s *Summarize) Compact(ctx context.Context, conv *types.Conversation) error {
+func (s *Summarize) Compact(ctx context.Context, conv *types.Conversation) (Result, error) {
 	if s == nil || conv == nil || conv.MaxTokens <= 0 {
-		return nil
+		return Result{}, nil
 	}
 	if s.Summarizer == nil {
-		return ErrNoSummarizer
+		return Result{}, ErrNoSummarizer
 	}
 
 	sys := systemPrefix(conv)
@@ -175,7 +175,7 @@ func (s *Summarize) Compact(ctx context.Context, conv *types.Conversation) error
 	rounds := SplitRounds(body)
 	keep := s.keepRounds()
 	if len(rounds) <= keep {
-		return nil // nothing outside the protected window
+		return Result{}, nil // nothing outside the protected window
 	}
 	droppedRounds := len(rounds) - keep
 	cut := rounds[droppedRounds-1].End
@@ -190,14 +190,18 @@ func (s *Summarize) Compact(ctx context.Context, conv *types.Conversation) error
 		dropped = append(dropped, body[i])
 	}
 	if len(dropped) == 0 {
-		return nil
+		return Result{}, nil
 	}
 
 	summary, err := s.call(ctx, dropped)
 	if err != nil {
-		return err
+		return Result{}, err
 	}
 
+	summaryRow := types.Message{
+		Role:    types.RoleUser,
+		Content: fmt.Sprintf(summarizeHeaderFormat, droppedRounds, len(dropped)) + summary,
+	}
 	msgs := make([]types.Message, 0, len(conv.Messages))
 	msgs = append(msgs, conv.Messages[:sys]...)
 	// The original task survives verbatim, ahead of the summary — but only
@@ -206,20 +210,28 @@ func (s *Summarize) Compact(ctx context.Context, conv *types.Conversation) error
 	// (a hard pre-send trim removed the original turn, or the session was
 	// restored from the store), firstUser >= cut: the task is already part of
 	// the retained window and re-inserting it here would duplicate it.
+	keptPrefix := make([]int, 0, sys+1)
+	for i := 0; i < sys; i++ {
+		keptPrefix = append(keptPrefix, i)
+	}
 	if firstUser >= 0 && firstUser < cut {
 		msgs = append(msgs, body[firstUser])
+		keptPrefix = append(keptPrefix, sys+firstUser)
 	}
-	msgs = append(msgs, types.Message{
-		Role:    types.RoleUser,
-		Content: fmt.Sprintf(summarizeHeaderFormat, droppedRounds, len(dropped)) + summary,
-	})
+	msgs = append(msgs, summaryRow)
 	msgs = append(msgs, body[cut:]...)
 
 	conv.ReplaceMessages(msgs)
 	slog.Info("compact: summarized oldest rounds",
 		"rounds", droppedRounds, "droppedMessages", len(dropped),
 		"summaryTokens", types.Estimator(summary), "tokens", conv.GetTotalTokens())
-	return nil
+	return Result{
+		Summary:           summaryRow.Content,
+		SummaryRole:       summaryRow.Role,
+		KeptFromIndex:     sys + cut, // pre-compaction index where the tail starts
+		KeptPrefixIndices: keptPrefix,
+		Anchorable:        true,
+	}, nil
 }
 
 // call renders the transcript, invokes the Summarizer under the configured

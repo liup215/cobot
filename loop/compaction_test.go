@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/liup215/cobot/compact"
 	"github.com/liup215/cobot/prompts"
 	"github.com/liup215/cobot/provider"
 	"github.com/liup215/cobot/tools"
@@ -20,16 +21,17 @@ type recordingStrategy struct {
 	mu       sync.Mutex
 	compacts int
 	lastConv *types.Conversation
+	result   compact.Result // what Compact reports (zero = not anchorable)
 }
 
 func (s *recordingStrategy) ShouldCompact(*types.Conversation) bool { return true }
 
-func (s *recordingStrategy) Compact(_ context.Context, conv *types.Conversation) error {
+func (s *recordingStrategy) Compact(_ context.Context, conv *types.Conversation) (compact.Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.compacts++
 	s.lastConv = conv
-	return nil
+	return s.result, nil
 }
 
 func (s *recordingStrategy) callCount() int {
@@ -52,7 +54,17 @@ func (s *recordingStrategy) conversation() *types.Conversation {
 // line and the 100% pre-send hard trim, while conversation + system prompt +
 // tool descriptions cross the 60% budget line.
 func TestOptionsCompactionRunsInjectedStrategyAtBudgetHook(t *testing.T) {
-	strategy := &recordingStrategy{}
+	// The strategy reports an ANCHORABLE result (what Summarize produces):
+	// the loop must forward it to a CompactionAware callback so a transcript
+	// store can persist {summary, anchor} without diffing messages.
+	wantResult := compact.Result{
+		Summary:           "[COMPACTED] old rounds condensed",
+		SummaryRole:       types.RoleUser,
+		KeptFromIndex:     5,
+		KeptPrefixIndices: []int{0},
+		Anchorable:        true,
+	}
+	strategy := &recordingStrategy{result: wantResult}
 	prov := provider.NewScriptedProvider(
 		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c1", "done")}},
 	)
@@ -116,5 +128,17 @@ func TestOptionsCompactionRunsInjectedStrategyAtBudgetHook(t *testing.T) {
 	}
 	if !hookFired {
 		t.Errorf("no 60%% budget compaction event fired, got %v", cb.snapshot().compactionStarts)
+	}
+
+	// The typed result reached the callback verbatim (CompactionAware).
+	if len(cb.compactionApplied) != 1 {
+		t.Fatalf("OnCompactionApplied called %d times, want 1", len(cb.compactionApplied))
+	}
+	got := cb.compactionApplied[0]
+	if !got.Anchorable || got.Summary != wantResult.Summary || got.KeptFromIndex != wantResult.KeptFromIndex {
+		t.Errorf("applied result = %+v, want %+v", got, wantResult)
+	}
+	if len(got.KeptPrefixIndices) != 1 || got.KeptPrefixIndices[0] != 0 {
+		t.Errorf("kept prefix indices = %v, want [0]", got.KeptPrefixIndices)
 	}
 }

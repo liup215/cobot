@@ -621,7 +621,7 @@ func (a *BaseAgent) SetTaskTitle(title string) {
 func (a *BaseAgent) Compact() bool {
 	beforeMsgs := a.conversation.MessageCount()
 	beforeTokens := a.conversation.GetTotalTokens()
-	a.runCompaction(context.Background(), a.conversation)
+	a.runCompaction(context.Background(), a.conversation, nil)
 	afterMsgs := a.conversation.MessageCount()
 	compacted := afterMsgs < beforeMsgs || a.conversation.GetTotalTokens() < beforeTokens
 	if compacted {
@@ -633,18 +633,30 @@ func (a *BaseAgent) Compact() bool {
 // runCompaction applies the compaction strategy to conv. A strategy error is
 // logged and swallowed: compaction is an optimization, never a reason to fail
 // the run (the pre-send hard trim stays the safety net).
-func (a *BaseAgent) runCompaction(ctx context.Context, conv *types.Conversation) {
+// runCompaction applies the configured strategy. A strategy error is logged
+// and swallowed: compaction is an optimization, never a reason to fail the
+// run (the pre-send hard trim stays the safety net). When the result is
+// anchorable the typed CompactionAware extension receives it — the durable
+// persistence hook (summary + anchor) that replaces guessing the shape from
+// message diffs.
+func (a *BaseAgent) runCompaction(ctx context.Context, conv *types.Conversation, callback provider.StreamCallback) compact.Result {
 	if a.compaction == nil {
 		// Zero-value agent (constructed outside New): legacy gline behavior.
 		conv.AutoCompact()
-		return
+		return compact.Result{}
 	}
-	if err := a.compaction.Compact(ctx, conv); err != nil {
+	res, err := a.compaction.Compact(ctx, conv)
+	if err != nil {
 		logWarnf("Compaction strategy %T failed: %v", a.compaction, err)
+		return compact.Result{}
 	}
+	if res.Anchorable {
+		if ca, ok := callback.(provider.CompactionAware); ok {
+			ca.OnCompactionApplied(res)
+		}
+	}
+	return res
 }
-
-// GetCompaction returns the configured compaction strategy.
 func (a *BaseAgent) GetCompaction() compact.Strategy {
 	return a.compaction
 }
@@ -791,7 +803,7 @@ func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string,
 	if callback != nil {
 		callback.OnCompactionStart(reason)
 	}
-	a.runCompaction(ctx, conv)
+	a.runCompaction(ctx, conv, callback)
 
 	if conv.GetTotalTokens() > budget*8/10 {
 		conv.TrimToMaxTokens()

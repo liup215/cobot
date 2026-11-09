@@ -87,8 +87,33 @@ type Strategy interface {
 	// trigger watermark and compaction would change something.
 	ShouldCompact(conv *types.Conversation) bool
 
-	// Compact rewrites conv in place to fit the token budget.
-	Compact(ctx context.Context, conv *types.Conversation) error
+	// Compact rewrites conv in place to fit the token budget and reports
+	// what it did (see Result).
+	Compact(ctx context.Context, conv *types.Conversation) (Result, error)
+}
+
+// Result reports what one compaction did — the typed alternative to making
+// hosts reverse-engineer the outcome from message diffs.
+type Result struct {
+	// Summary is the exact content of the inserted summary row: what a
+	// durable compaction entry must store to rebuild the transcript.
+	Summary string
+	// SummaryRole is that row's role (Summarize emits user).
+	SummaryRole types.Role
+	// KeptFromIndex is the PRE-compaction conversation index where the kept
+	// tail begins. Rows [0, KeptFromIndex) were dropped, modulo the
+	// protected prefix below.
+	KeptFromIndex int
+	// KeptPrefixIndices are PRE-compaction indices of protected rows kept
+	// verbatim from BEFORE the cut (leading system rows, the original
+	// task). A single anchor cannot express their non-contiguous keep —
+	// a persisting host needs these to rebuild.
+	KeptPrefixIndices []int
+	// Anchorable reports whether this result can be persisted as a
+	// {summary, kept-after, prefix} entry. Trim's interleaved survivors and
+	// no-op runs are NOT anchorable — the host keeps the full transcript
+	// and re-compacts on the next load (the safe status quo).
+	Anchorable bool
 }
 
 // Round is one conversational turn: a user message together with everything

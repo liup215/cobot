@@ -86,12 +86,12 @@ func (t *Trim) ShouldCompact(conv *types.Conversation) bool {
 
 // Compact drops the oldest rounds until the conversation is back below the
 // low watermark, then applies the gline hard trim if that was not enough.
-func (t *Trim) Compact(ctx context.Context, conv *types.Conversation) error {
+func (t *Trim) Compact(ctx context.Context, conv *types.Conversation) (Result, error) {
 	if conv == nil || conv.MaxTokens <= 0 {
-		return nil
+		return Result{}, nil
 	}
 	if conv.GetTotalTokens() <= watermark(conv, t.lowWatermark()) {
-		return nil // below the watermark: nothing is touched
+		return Result{}, nil // below the watermark: nothing is touched
 	}
 
 	// Each pass drops leading rounds; the pass is repeated while the
@@ -111,7 +111,10 @@ func (t *Trim) Compact(ctx context.Context, conv *types.Conversation) error {
 		}
 	}
 
-	return t.hardTrimIfStillOver(conv)
+	// Trim results are never anchorable: its survivors interleave protected
+	// rows with the kept tail, which one {summary, anchor} entry cannot
+	// express — the host keeps the full transcript (safe status quo).
+	return Result{}, t.hardTrimIfStillOver(conv)
 }
 
 // dropOldestRounds drops as many leading unprotected rounds as needed to get

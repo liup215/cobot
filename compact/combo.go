@@ -50,32 +50,40 @@ func (c *Combo) ShouldCompact(conv *types.Conversation) bool {
 
 // Compact runs the primary strategy and falls back to the secondary one on
 // failure or when the fallback watermark is still exceeded.
-func (c *Combo) Compact(ctx context.Context, conv *types.Conversation) error {
+func (c *Combo) Compact(ctx context.Context, conv *types.Conversation) (Result, error) {
 	if c == nil || conv == nil {
-		return nil
+		return Result{}, nil
 	}
 
 	var primaryErr error
+	var primaryResult Result
 	if c.Primary != nil && c.Primary.ShouldCompact(conv) {
-		if err := c.Primary.Compact(ctx, conv); err != nil {
+		res, err := c.Primary.Compact(ctx, conv)
+		if err != nil {
 			primaryErr = err
 			slog.Warn("compact: primary strategy failed; falling back", "strategy", fmt.Sprintf("%T", c.Primary), "err", err)
+		} else {
+			primaryResult = res
 		}
 	}
 
 	if c.Fallback == nil {
-		return primaryErr
+		return primaryResult, primaryErr
 	}
 	if primaryErr == nil && !c.Fallback.ShouldCompact(conv) {
 		// The primary already brought the conversation below the fallback's
-		// watermark.
-		return nil
+		// watermark — its (anchorable) result describes the final state.
+		return primaryResult, nil
 	}
-	if err := c.Fallback.Compact(ctx, conv); err != nil {
+	// The fallback rewrote the conversation on top of (or instead of) the
+	// primary — its result describes the final state and is never anchorable
+	// (Trim keeps interleaved survivors).
+	res, err := c.Fallback.Compact(ctx, conv)
+	if err != nil {
 		if primaryErr != nil {
-			return fmt.Errorf("compact: primary failed (%v) and fallback failed: %w", primaryErr, err)
+			return Result{}, fmt.Errorf("compact: primary failed (%v) and fallback failed: %w", primaryErr, err)
 		}
-		return err
+		return Result{}, err
 	}
-	return nil
+	return res, nil
 }

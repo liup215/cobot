@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/liup215/cobot/compact"
 	"github.com/liup215/cobot/types"
 )
 
@@ -266,6 +267,17 @@ type StreamCallback interface {
 // hosts that do not keep the plain two-parameter flow and the flag is dropped.
 type MultiAskCallback interface {
 	AskFollowupQuestionMulti(question string, options []string, allowMultiple bool) (string, error)
+}
+
+// CompactionAware is an OPTIONAL StreamCallback extension carrying the TYPED
+// compaction result — the durable-persistence hook. After a compaction the
+// loop type-asserts the callback: hosts implementing it receive the summary,
+// the pre-compaction kept-tail index and the protected-prefix indices, so a
+// transcript store can persist {summary, anchor} directly instead of guessing
+// the shape from message diffs. Hosts that do not implement it keep the plain
+// OnCompactionStart/End notices.
+type CompactionAware interface {
+	OnCompactionApplied(res compact.Result)
 }
 
 type StreamCallbackAdapter struct{}

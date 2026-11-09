@@ -101,9 +101,9 @@ type failingStrategy struct {
 
 func (f *failingStrategy) ShouldCompact(*types.Conversation) bool { return f.shouldCompact }
 
-func (f *failingStrategy) Compact(context.Context, *types.Conversation) error {
+func (f *failingStrategy) Compact(context.Context, *types.Conversation) (Result, error) {
 	f.calls++
-	return f.err
+	return Result{}, f.err
 }
 
 // roundMarkers returns the "round-N" markers present in msgs.
@@ -191,7 +191,7 @@ func TestTrimKeepsProtectedMessagesAndRecentRounds(t *testing.T) {
 	if !strategy.ShouldCompact(conv) {
 		t.Fatal("ShouldCompact = false, want true above the low watermark")
 	}
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("Compact returned error: %v", err)
 	}
 
@@ -236,7 +236,7 @@ func TestTrimBelowWatermarkIsNoOp(t *testing.T) {
 	if strategy.ShouldCompact(conv) {
 		t.Fatal("ShouldCompact = true, want false below the low watermark")
 	}
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("Compact returned error: %v", err)
 	}
 	if conv.GetTotalTokens() != before || len(conv.Messages) != len(msgs) {
@@ -255,7 +255,7 @@ func TestTrimIsIdempotent(t *testing.T) {
 
 	strategy := NewTrim()
 	strategy.KeepRounds = 2
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("first Compact: %v", err)
 	}
 	after := make([]string, len(conv.Messages))
@@ -264,7 +264,7 @@ func TestTrimIsIdempotent(t *testing.T) {
 	}
 	tokens := conv.GetTotalTokens()
 
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("second Compact: %v", err)
 	}
 	if conv.GetTotalTokens() != tokens {
@@ -295,7 +295,7 @@ func TestTrimNothingCompactableFallsBackToHardTrim(t *testing.T) {
 	before := conv.GetTotalTokens()
 
 	strategy := &Trim{KeepRounds: 6}
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("Compact returned error: %v", err)
 	}
 	if conv.GetTotalTokens() >= before {
@@ -352,7 +352,7 @@ func TestSummarizeReplacesDroppedRounds(t *testing.T) {
 	if !strategy.ShouldCompact(conv) {
 		t.Fatal("ShouldCompact = false, want true above the low watermark with compactable rounds")
 	}
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("Compact returned error: %v", err)
 	}
 	if fake.calls != 1 {
@@ -411,7 +411,7 @@ func TestSummarizeTranscriptContents(t *testing.T) {
 
 	fake := &fakeSummarizer{summary: "summary"}
 	strategy := &Summarize{Summarizer: fake, KeepRounds: 1}
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("Compact returned error: %v", err)
 	}
 
@@ -449,7 +449,7 @@ func TestSummarizePromptOverride(t *testing.T) {
 	conv := newSummarizeConv()
 	fake := &fakeSummarizer{summary: "custom summary"}
 	strategy := &Summarize{Summarizer: fake, Prompt: "CUSTOM PROMPT", KeepRounds: 2}
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("Compact returned error: %v", err)
 	}
 	if !strings.HasPrefix(fake.prompts[0], "CUSTOM PROMPT") {
@@ -475,7 +475,7 @@ func TestSummarizeNoCompactableRoundsNeverCallsLLM(t *testing.T) {
 	if strategy.ShouldCompact(conv) {
 		t.Error("ShouldCompact = true with no compactable round, want false")
 	}
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("Compact returned error: %v", err)
 	}
 	if fake.calls != 0 {
@@ -496,7 +496,7 @@ func TestSummarizeFailuresFallBack(t *testing.T) {
 		if strategy.ShouldCompact(conv) {
 			t.Error("ShouldCompact = true without a summarizer, want false")
 		}
-		err := strategy.Compact(context.Background(), conv)
+		_, err := strategy.Compact(context.Background(), conv)
 		if !errors.Is(err, ErrNoSummarizer) {
 			t.Errorf("err = %v, want ErrNoSummarizer", err)
 		}
@@ -505,7 +505,7 @@ func TestSummarizeFailuresFallBack(t *testing.T) {
 	t.Run("empty summary", func(t *testing.T) {
 		conv := newSummarizeConv()
 		strategy := &Summarize{Summarizer: &fakeSummarizer{summary: "   \n  "}}
-		err := strategy.Compact(context.Background(), conv)
+		_, err := strategy.Compact(context.Background(), conv)
 		if !errors.Is(err, ErrEmptySummary) {
 			t.Errorf("err = %v, want ErrEmptySummary", err)
 		}
@@ -514,7 +514,7 @@ func TestSummarizeFailuresFallBack(t *testing.T) {
 	t.Run("provider error", func(t *testing.T) {
 		conv := newSummarizeConv()
 		strategy := &Summarize{Summarizer: &fakeSummarizer{err: errors.New("boom")}}
-		err := strategy.Compact(context.Background(), conv)
+		_, err := strategy.Compact(context.Background(), conv)
 		if err == nil || !strings.Contains(err.Error(), "summarizer failed") {
 			t.Errorf("err = %v, want a wrapped summarizer failure", err)
 		}
@@ -523,7 +523,7 @@ func TestSummarizeFailuresFallBack(t *testing.T) {
 	t.Run("timeout", func(t *testing.T) {
 		conv := newSummarizeConv()
 		strategy := &Summarize{Summarizer: &fakeSummarizer{block: 500 * time.Millisecond}, Timeout: 20 * time.Millisecond}
-		err := strategy.Compact(context.Background(), conv)
+		_, err := strategy.Compact(context.Background(), conv)
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("err = %v, want context.DeadlineExceeded", err)
 		}
@@ -538,7 +538,7 @@ func TestSummarizeCaps(t *testing.T) {
 		conv := newSummarizeConv()
 		long := strings.Repeat("s", 5000)
 		strategy := &Summarize{Summarizer: &fakeSummarizer{summary: long}, KeepRounds: 2, MaxSummaryTokens: 100}
-		if err := strategy.Compact(context.Background(), conv); err != nil {
+		if _, err := strategy.Compact(context.Background(), conv); err != nil {
 			t.Fatalf("Compact returned error: %v", err)
 		}
 		if !strings.Contains(conv.Messages[2].Content, "[... summary truncated ...]") {
@@ -555,7 +555,7 @@ func TestSummarizeCaps(t *testing.T) {
 		conv := newSummarizeConv()
 		fake := &fakeSummarizer{summary: "summary"}
 		strategy := &Summarize{Summarizer: fake, KeepRounds: 2, MaxTranscriptTokens: 300}
-		if err := strategy.Compact(context.Background(), conv); err != nil {
+		if _, err := strategy.Compact(context.Background(), conv); err != nil {
 			t.Fatalf("Compact returned error: %v", err)
 		}
 		if !strings.Contains(fake.prompts[0], "older message(s) omitted") {
@@ -594,7 +594,7 @@ func TestSummarizeAssistantFirstHistoryDoesNotDuplicateTask(t *testing.T) {
 
 	fake := &fakeSummarizer{summary: "Task goal: fix the login bug"}
 	strategy := &Summarize{Summarizer: fake, KeepRounds: 1}
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("Compact returned error: %v", err)
 	}
 
@@ -654,7 +654,7 @@ func TestSummarizeRestoredToolFirstHistoryDoesNotDuplicateTask(t *testing.T) {
 
 	fake := &fakeSummarizer{summary: "summary text"}
 	strategy := &Summarize{Summarizer: fake, KeepRounds: 1}
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("Compact returned error: %v", err)
 	}
 
@@ -703,7 +703,7 @@ func TestSummarizeTaskInsideDroppedRangePreservedOnce(t *testing.T) {
 
 	fake := &fakeSummarizer{summary: "summary text"}
 	strategy := &Summarize{Summarizer: fake, KeepRounds: 1}
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("Compact returned error: %v", err)
 	}
 
@@ -766,7 +766,7 @@ func TestTrimAssistantFirstHistoryKeepsTaskOnce(t *testing.T) {
 	}
 
 	strategy := &Trim{KeepRounds: 1}
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("Compact returned error: %v", err)
 	}
 
@@ -808,7 +808,7 @@ func TestComboFallsBackWhenSummarizationFails(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			conv := newSummarizeConv()
 			strategy := NewCombo(&Summarize{Summarizer: fake, KeepRounds: 2}, NewTrim())
-			if err := strategy.Compact(context.Background(), conv); err != nil {
+			if _, err := strategy.Compact(context.Background(), conv); err != nil {
 				t.Fatalf("Combo returned error: %v", err)
 			}
 			if !strings.Contains(conv.Messages[2].Content, "[Context compacted:") {
@@ -832,7 +832,7 @@ func TestComboSkipsFallbackWhenPrimaryIsEnough(t *testing.T) {
 	conv := newSummarizeConv()
 	fake := &fakeSummarizer{summary: "Task goal: fix the login bug"}
 	strategy := NewCombo(&Summarize{Summarizer: fake, KeepRounds: 2}, NewTrim())
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("Combo returned error: %v", err)
 	}
 	if strings.Contains(conv.Messages[2].Content, "[Context compacted:") {
@@ -854,7 +854,7 @@ func TestComboRunsFallbackWhenPrimaryLeavesItOver(t *testing.T) {
 		&Summarize{Summarizer: fake, KeepRounds: 2, MaxSummaryTokens: 100000},
 		NewTrim(),
 	)
-	if err := strategy.Compact(context.Background(), conv); err != nil {
+	if _, err := strategy.Compact(context.Background(), conv); err != nil {
 		t.Fatalf("Combo returned error: %v", err)
 	}
 	if conv.GetTotalTokens() > conv.MaxTokens*60/100 {
@@ -874,7 +874,7 @@ func TestComboBothFailReturnsJoinedError(t *testing.T) {
 		&failingStrategy{shouldCompact: true, err: primaryErr},
 		&failingStrategy{shouldCompact: true, err: fallbackErr},
 	)
-	err := strategy.Compact(context.Background(), conv)
+	_, err := strategy.Compact(context.Background(), conv)
 	if err == nil || !strings.Contains(err.Error(), primaryErr.Error()) || !strings.Contains(err.Error(), fallbackErr.Error()) {
 		t.Fatalf("err = %v, want both failures joined", err)
 	}
