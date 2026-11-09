@@ -28,7 +28,9 @@
 package transcript
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
@@ -192,16 +194,28 @@ func addColumnIfMissing(db *sql.DB, table, column string) error {
 // Sessions (metadata)
 // ---------------------------------------------------------------------------
 
-// NewSession builds an unsaved session header (id from wall clock — the
-// desktop's existing convention, collision-safe enough for one local app).
+// NewSession builds an unsaved session header.
+//
+// The id carries wall time PLUS4 random bytes: time.Now().UnixNano() has
+// ~15.6ms granularity on Windows (measured: back-to-back calls return the
+// SAME value), so nano alone collides for two sessions born in one tick —
+// both conversations would share one row set and silently merge.
 func NewSession(title string) *SessionMeta {
 	now := time.Now()
 	return &SessionMeta{
-		ID:        fmt.Sprintf("sess_%d", now.UnixNano()),
+		ID:        newSessionID(now),
 		Title:     title,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+}
+
+// newSessionID = "sess_<wall-ns>-<8hex>" — collision-safe within and across
+// processes (2^-32 random suffix on top of the timestamp).
+func newSessionID(now time.Time) string {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("sess_%d-%s", now.UnixNano(), hex.EncodeToString(b[:]))
 }
 
 // Create persists a session header. Callers normally create lazily — on the

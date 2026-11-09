@@ -479,3 +479,18 @@ func TestCloseIdempotent(t *testing.T) {
 		t.Fatal("load after close must error")
 	}
 }
+
+// TestNewSessionIDsUniqueWithinOneTick pins the collision fix: on Windows
+// time.Now().UnixNano() repeats within ~15.6ms (measured), so two sessions
+// born back-to-back MUST still get distinct ids — same-tick ids silently
+// merged two conversations under one row set.
+func TestNewSessionIDsUniqueWithinOneTick(t *testing.T) {
+	seen := make(map[string]bool, 2000)
+	for i := 0; i < 2000; i++ {
+		id := NewSession("s").ID
+		if seen[id] {
+			t.Fatalf("duplicate session id at call %d: %s", i, id)
+		}
+		seen[id] = true
+	}
+}
