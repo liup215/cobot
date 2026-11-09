@@ -173,8 +173,13 @@ type BaseAgent struct {
 	mode         Mode
 	conversation *types.Conversation
 
-	running                bool
-	abort                  atomic.Bool
+	running bool
+	abort   atomic.Bool
+	// runCancel cancels the run's own context — Abort() fires it so a run
+	// blocked on a provider stream or a shell command unwinds IMMEDIATELY
+	// (the abort flag alone is only read at the next loop-top checkpoint).
+	runCancelMu            sync.Mutex
+	runCancel              context.CancelFunc
 	autoApprove            bool
 	maxConsecutiveMistakes int
 	consecutiveMistakes    int
@@ -313,7 +318,11 @@ func (a *BaseAgent) Run(ctx context.Context, prompt string) (*RunResult, error) 
 // provider stream, stops executing tools (including in-flight pre-dispatch
 // goroutines, which are awaited before returning) and stops issuing new LLM
 // requests; the interrupted turn is not recorded in the conversation.
-// Abort() remains the separate, non-error cancellation channel.
+// Abort() sets the abort checkpoint AND cancels the run's own context — the
+// cancel is what interrupts a blocked provider stream or shell command
+// immediately (host stop buttons used to wait for the next checkpoint, a
+// visible delay), while the OUTCOME stays the abort contract: non-error,
+// OnComplete teardown, task marked aborted (see canceledRunResult).
 func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback StreamCallback) (*RunResult, error) {
 	if a.running {
 		return nil, fmt.Errorf("agent is already running")
@@ -321,10 +330,17 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 
 	a.running = true
 	a.abort.Store(false)
+	// Own the cancellation: every ctx use below (provider request, stream
+	// read, tools, backoff) is this child — Abort() cancels it, so a blocked
+	// phase unwinds instantly instead of at the next checkpoint.
+	ctx, cancel := context.WithCancel(ctx)
+	a.setRunCancel(cancel)
 	// Ensure running is always reset, even on panic. In-flight pre-dispatch
 	// goroutines are awaited first so no agent-owned goroutine outlives the
 	// run (this is what makes context cancellation leak-free).
 	defer func() {
+		cancel()
+		a.setRunCancel(nil)
 		a.preDispatchWG.Wait()
 		a.running = false
 		// Also clear the abort flag so subsequent runs start fresh.
@@ -722,6 +738,30 @@ func (a *BaseAgent) GetMode() Mode {
 // context, which takes precedence over a pending abort flag.
 func (a *BaseAgent) Abort() {
 	a.abort.Store(true)
+	// Cancel the run's context too: the flag alone lands only at the loop
+	// top / turn boundary, so a run blocked on a slow stream or a long shell
+	// command kept going — the host's stop button felt broken (long delay).
+	// Cancelling unwinds provider reads and kills in-flight tools through
+	// the standard ctx path (wrapped context.Canceled).
+	if cancel := a.takeRunCancel(); cancel != nil {
+		cancel()
+	}
+}
+
+// setRunCancel records the active run's cancel func (nil again at run end).
+func (a *BaseAgent) setRunCancel(c context.CancelFunc) {
+	a.runCancelMu.Lock()
+	defer a.runCancelMu.Unlock()
+	a.runCancel = c
+}
+
+// takeRunCancel returns and clears it (Abort fires it at most once).
+func (a *BaseAgent) takeRunCancel() context.CancelFunc {
+	a.runCancelMu.Lock()
+	defer a.runCancelMu.Unlock()
+	c := a.runCancel
+	a.runCancel = nil
+	return c
 }
 
 // IsRunning returns true if the Agent is currently processing

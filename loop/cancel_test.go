@@ -244,42 +244,46 @@ func TestContextCancelDuringPreDispatch(t *testing.T) {
 // in-flight provider read — that is the run context's job. Aborting a hung
 // stream leaves the run blocked; canceling the context then ends it with the
 // wrapped context error, which wins over the pending abort flag.
-func TestAbortDoesNotUnblockStreamReadButContextDoes(t *testing.T) {
+// Abort must INTERRUPT a run that is blocked reading the stream: it now
+// cancels the run's own context (the flag used to be only a checkpoint —
+// a host stop button waited for the stream to end on its own, a visible
+// delay). The wrapped context.Canceled still surfaces, and the agent is
+// idle again with its abort flag reset for the next run.
+func TestAbortUnblocksBlockedStreamPromptly(t *testing.T) {
 	agent := newEchoCompletionAgent(t, &hangingStreamProvider{})
 	cb := &recordingCallback{}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	done := make(chan struct{})
 	var runErr error
 	go func() {
 		defer close(done)
-		_, runErr = agent.RunWithCallback(ctx, "task", cb)
+		_, runErr = agent.RunWithCallback(context.Background(), "task", cb)
 	}()
 
 	time.Sleep(50 * time.Millisecond)
+	start := time.Now()
 	agent.Abort()
-
-	// Abort alone does not end a run that is blocked reading the stream.
 	select {
 	case <-done:
-		t.Fatal("RunWithCallback returned from Abort alone; the abort flag is a checkpoint, not an interrupt")
-	case <-time.After(150 * time.Millisecond):
-	}
-
-	// Canceling the context is what unblocks it — and the wrapped context
-	// error wins over the pending abort flag.
-	cancel()
-	select {
-	case <-done:
+		if took := time.Since(start); took > 2*time.Second {
+			t.Fatalf("abort unblocked only after %v — must be prompt", took)
+		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("RunWithCallback did not return after ctx cancellation")
+		t.Fatal("Abort did not interrupt the blocked stream")
 	}
-	if !errors.Is(runErr, context.Canceled) {
-		t.Fatalf("err = %v, want a wrapped context.Canceled", runErr)
+	// Abort keeps its non-error contract (the cancel is only the interrupt):
+	// prompt return, no error, OnComplete teardown — same outcome the
+	// flag-only path produced at the loop top.
+	if runErr != nil {
+		t.Fatalf("err = %v, want nil (abort is not an error)", runErr)
+	}
+	if cb.completed != 1 {
+		t.Errorf("OnComplete fired %d times, want 1", cb.completed)
 	}
 	if agent.IsRunning() {
-		t.Error("agent still marked running after the canceled run")
+		t.Error("agent still marked running after the aborted run")
+	}
+	if agent.abort.Load() {
+		t.Error("abort flag not reset — the next run would die instantly")
 	}
 }
 

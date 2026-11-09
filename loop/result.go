@@ -169,6 +169,18 @@ func (a *BaseAgent) canceledRunResult(ctx context.Context, run *runStats, callba
 	if cerr == nil {
 		return nil, nil, false
 	}
+	// A cancel WE fired — Abort() cancels the run's context to interrupt a
+	// blocked provider stream / shell command IMMEDIATELY — keeps the abort
+	// contract: non-error outcome, OnComplete teardown, task marked aborted
+	// (exactly what the flag-only path did at the loop top). Externally
+	// canceled contexts stay errors.
+	if a.abort.Load() {
+		a.failTask("aborted")
+		if callback != nil {
+			callback.OnComplete()
+		}
+		return a.buildRunResult(run, nil), nil, true
+	}
 	a.failTask(cerr.Error())
 	if callback != nil {
 		callback.OnError(cerr)
