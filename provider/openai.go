@@ -163,14 +163,14 @@ type OpenAIToolFunction struct {
 
 // OpenAIRequest represents the request body for OpenAI API
 type OpenAIRequest struct {
-	Model         string                `json:"model"`
-	Messages      []OpenAIMessage       `json:"messages"`
-	Tools         []OpenAITool          `json:"tools,omitempty"`
-	ToolChoice    interface{}           `json:"tool_choice,omitempty"`
-	Temperature   float64               `json:"temperature,omitempty"`
-	MaxTokens     int                   `json:"max_tokens,omitempty"`
-	Stream        bool                  `json:"stream,omitempty"`
-	StreamOptions *OpenAIStreamOptions  `json:"stream_options,omitempty"`
+	Model         string               `json:"model"`
+	Messages      []OpenAIMessage      `json:"messages"`
+	Tools         []OpenAITool         `json:"tools,omitempty"`
+	ToolChoice    interface{}          `json:"tool_choice,omitempty"`
+	Temperature   float64              `json:"temperature,omitempty"`
+	MaxTokens     int                  `json:"max_tokens,omitempty"`
+	Stream        bool                 `json:"stream,omitempty"`
+	StreamOptions *OpenAIStreamOptions `json:"stream_options,omitempty"`
 }
 
 // OpenAIStreamOptions carries streaming request options. IncludeUsage asks

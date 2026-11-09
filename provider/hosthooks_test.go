@@ -104,7 +104,7 @@ func TestOpenAIStreamRequestHeadersAndHooks(t *testing.T) {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
-		MaxTokens     int  `json:"max_tokens"`
+		MaxTokens     int `json:"max_tokens"`
 		StreamOptions *struct {
 			IncludeUsage bool `json:"include_usage"`
 		} `json:"stream_options"`
