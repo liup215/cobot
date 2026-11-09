@@ -329,6 +329,31 @@ func (c *Conversation) ReplaceMessages(msgs []Message) {
 	c.ResetActualTokens()
 }
 
+// PatchMessageContent rewrites ONE message's content in place and adjusts
+// the token estimate by the delta. Unlike ReplaceMessages it does NOT reset
+// the actual-usage counters: hosts stamp usage at the NEXT stream start
+// (closeTurn), and a session-level reset here would silently drop the turn's
+// facts. Designed for deliver-once marking (host stubs delivered image
+// markers between requests while the run keeps streaming).
+// Returns false when idx is out of range.
+func (c *Conversation) PatchMessageContent(idx int, content string) bool {
+	if idx < 0 || idx >= len(c.Messages) {
+		return false
+	}
+	m := c.Messages[idx]
+	if m.Content == content {
+		return true
+	}
+	before := MessageTokens(m)
+	m.Content = content
+	c.Messages[idx] = m
+	c.CurrentTokens += MessageTokens(m) - before
+	if c.CurrentTokens < 0 {
+		c.CurrentTokens = 0
+	}
+	return true
+}
+
 // MessageTokens returns the estimated token count of a single message,
 // including its role, reasoning content and tool calls. Compaction
 // strategies use it to account for dropped or inserted messages.

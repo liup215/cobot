@@ -230,3 +230,40 @@ func indexOf(s, substr string) int {
 	}
 	return -1
 }
+
+// TestPatchMessageContent pins the deliver-once patch primitive: content
+// mutates, the token estimate follows the delta, and — the whole point —
+// the actual-usage counters SURVIVE (ReplaceMessages resets them, which
+// would drop the turn's usage fact when a host stubs delivered images
+// mid-run at the next stream start).
+func TestPatchMessageContent(t *testing.T) {
+	c := &Conversation{}
+	c.AddMessage(Message{Role: RoleUser, Content: "[image: a.png]\nmeta"})
+	c.AddMessage(Message{Role: RoleAssistant, Content: "ok"})
+	c.AddActualTokens(111, 22)
+	totalBefore := c.GetTotalTokens()
+
+	patched := "[image: a.png | viewed]\nmeta"
+	if !c.PatchMessageContent(0, patched) {
+		t.Fatal("patch of existing index failed")
+	}
+	if c.Messages[0].Content != patched {
+		t.Fatalf("content not patched: %q", c.Messages[0].Content)
+	}
+	if c.Messages[1].Content != "ok" {
+		t.Fatalf("neighbor touched: %q", c.Messages[1].Content)
+	}
+	if in, out := c.GetActualTokens(); in != 111 || out != 22 {
+		t.Fatalf("actual usage lost: %d/%d", in, out)
+	}
+	if total := c.GetTotalTokens(); total == 0 || total == totalBefore && totalBefore == 0 {
+		t.Fatalf("token estimate not maintained: %d", total)
+	}
+	if c.PatchMessageContent(-1, "x") || c.PatchMessageContent(99, "x") {
+		t.Fatal("out-of-range patch must report false")
+	}
+	// Same content = no-op success (idempotent stubbing).
+	if !c.PatchMessageContent(0, patched) {
+		t.Fatal("idempotent patch failed")
+	}
+}
