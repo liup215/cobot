@@ -75,8 +75,11 @@ func TestRunResultFromAttemptCompletion(t *testing.T) {
 // A run that ends abnormally (stream error) still returns a usable result:
 // the last assistant text as FinalText and the error mirrored into RunResult.Err.
 func TestRunResultAbnormalEndFallsBackToLastAssistantText(t *testing.T) {
+	// A plain-text reply now completes the run (pi semantics), so the
+	// abnormal-end fallback needs a turn that does NOT end the run: text
+	// WITH a tool call (echo executes), then the failing request.
 	agent, _ := newTestAgent(t,
-		provider.TurnScript{Content: "partial analysis of the task"},
+		provider.TurnScript{Content: "partial analysis of the task", ToolCalls: []provider.ToolCall{echoCall("e1")}},
 		provider.TurnScript{Err: errors.New("boom")},
 	)
 	res, err := agent.RunWithCallback(context.Background(), "task", &recordingCallback{})
@@ -184,11 +187,13 @@ func TestRunResultScopedToRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second run: %v", err)
 	}
-	if res2.FinalText != "second done" {
-		t.Errorf("second FinalText = %q, want this run's deliverable only", res2.FinalText)
+	// The plain-text turn completes run 2 immediately (pi semantics — no
+	// correction round), and its FinalText must stay scoped to THIS run.
+	if res2.FinalText != "second run analysis" {
+		t.Errorf("second FinalText = %q, want this run's own text answer", res2.FinalText)
 	}
-	if res2.Turns != 2 { // "no tool used" correction turn + completion turn
-		t.Errorf("second Turns = %d, want 2", res2.Turns)
+	if res2.Turns != 1 {
+		t.Errorf("second Turns = %d, want 1 (text answer ends the run)", res2.Turns)
 	}
 }
 

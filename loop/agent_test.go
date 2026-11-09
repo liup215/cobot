@@ -307,40 +307,74 @@ func TestAskFollowupDoesNotTerminate(t *testing.T) {
 
 // ─── correction loop (FR-L2) ─────────────────────────────────────────────────
 
-// When tools are available but the model replies with plain text, the loop
-// injects noToolsUsedMsg and gives the model another chance.
-func TestNoToolsUsedInjectsCorrection(t *testing.T) {
+// pi semantics: a NON-EMPTY plain-text reply IS the final answer — the run
+// completes with it, no correction injected, no strike.
+func TestPlainTextReplyCompletesTheRun(t *testing.T) {
 	agent, _ := newTestAgent(t,
-		provider.TurnScript{Content: "just talking, no tools"},
+		provider.TurnScript{Content: "all done — here is the answer, no tools needed"},
+	)
+	cb := &recordingCallback{}
+	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+		t.Fatalf("plain-text completion must not fail the run: %v", err)
+	}
+	if !agent.GetConversation().IsComplete() {
+		t.Fatal("conversation not marked complete by the text answer")
+	}
+	if cb.completed != 1 {
+		t.Fatalf("OnComplete fired %d times, want 1", cb.completed)
+	}
+	for _, m := range agent.GetConversation().GetMessages() {
+		if m.Role == types.RoleUser && strings.Contains(m.Content, emptyResponseMsg) {
+			t.Fatalf("text answer must NOT trigger a correction: %q", m.Content)
+		}
+	}
+}
+
+// An EMPTY reply (no text, no tool calls) gets one correction round — it is
+// not completion. After the correction the run finishes normally.
+func TestEmptyResponseGetsOneCorrection(t *testing.T) {
+	agent, _ := newTestAgent(t,
+		provider.TurnScript{Content: ""},
 		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c2", "done")}},
 	)
 	cb := &recordingCallback{}
 	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	var found bool
+	var corrections int
 	for _, m := range agent.GetConversation().GetMessages() {
-		if m.Role == types.RoleUser && strings.Contains(m.Content, noToolsUsedMsg) {
-			found = true
+		if m.Role == types.RoleUser && strings.Contains(m.Content, emptyResponseMsg) {
+			corrections++
 		}
 	}
-	if !found {
-		t.Error("noToolsUsedMsg not injected into conversation")
+	if corrections != 1 {
+		t.Fatalf("empty-reply corrections = %d, want exactly 1", corrections)
+	}
+	if !agent.GetConversation().IsComplete() {
+		t.Fatal("run must complete after the corrected turn")
 	}
 }
 
-// Three consecutive no-tool replies exhaust the correction budget and the
-// run fails with a "max consecutive mistakes" error.
-func TestMaxConsecutiveMistakesStopsRun(t *testing.T) {
+// Three consecutive EMPTY replies exhaust the budget and fail the run with
+// an empty-response error (the old text-reply circuit breaker is gone —
+// that is pi semantics: text answers complete, they never strike).
+func TestConsecutiveEmptyResponsesStopRun(t *testing.T) {
 	agent, _ := newTestAgent(t,
-		provider.TurnScript{Content: "no tools 1"},
-		provider.TurnScript{Content: "no tools 2"},
-		provider.TurnScript{Content: "no tools 3"},
+		provider.TurnScript{Content: ""},
+		provider.TurnScript{Content: ""},
+		provider.TurnScript{Content: ""},
 	)
 	cb := &recordingCallback{}
 	_, err := agent.RunWithCallback(context.Background(), "task", cb)
-	if err == nil || !strings.Contains(err.Error(), "max consecutive mistakes") {
-		t.Fatalf("want max-mistakes error, got %v", err)
+	if err == nil {
+		t.Fatal("three empty replies must fail the run")
+	}
+	if !strings.Contains(err.Error(), "empty responses") {
+		t.Fatalf("error = %v, want the empty-response circuit breaker", err)
+	}
+	// A plain-text reply must never hit this breaker any more.
+	if strings.Contains(err.Error(), "did not use a tool") {
+		t.Fatalf("obsolete no-tool breaker text survived: %v", err)
 	}
 }
 

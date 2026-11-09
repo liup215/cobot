@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,12 +33,14 @@ type (
 	MessageResponse       = provider.MessageResponse
 )
 
-// noToolsUsedMsg is injected into the conversation when the assistant returns a
-// response without calling any tools while tool-calling is required.
-const noToolsUsedMsg = `[ERROR] You did not use a tool in your previous response.
-When you have a task to perform, you MUST use one of the available tools.
-Only calling attempt_completion, ask_followup_question, or plan_mode_respond can end the conversation.
-Please review the task and call the appropriate tool(s).`
+// emptyResponseMsg is injected when the model returns NOTHING usable: no
+// tool calls and no text (typically a reasoning model that spent its whole
+// output budget on reasoning). Empty replies get one correction round — they
+// are NOT completion. A NON-EMPTY plain-text reply, by contrast, IS the
+// model's final answer: the run completes with it (pi semantics — see the
+// terminal check in the loop), with no correction and no strike.
+const emptyResponseMsg = `[ERROR] Your previous response was empty.
+Return either the tool call required to continue the work, or a non-empty final answer.`
 
 // Mode represents the operating mode of the Agent
 type Mode string
@@ -518,24 +521,33 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 			return res, cerr
 		}
 
-		// If the conversation is not complete but the last assistant message has
-		// no tool calls while tools are still needed, inject the no-tools-used
-		// reminder so the next loop iteration forces the model to call a tool.
+		// Terminal check, relaxed to pi semantics: a NON-EMPTY plain-text
+		// reply is the model's final answer — mark the conversation complete
+		// and let the completion path below (task store + OnComplete) finish
+		// the run successfully. No correction, no strike: pi never punishes
+		// text-as-answer, which is exactly why its long tasks never die to a
+		// "did not use a tool" circuit breaker. Only an EMPTY reply (no tool
+		// calls, no text — e.g. reasoning burned the output budget) counts as
+		// a mistake: one correction round, three in a row fail the run.
 		if !a.conversation.IsComplete() && !a.abort.Load() {
 			messages := a.conversation.GetMessages()
 			if len(messages) > 0 {
 				lastMsg := messages[len(messages)-1]
 				if lastMsg.Role == types.RoleAssistant && len(lastMsg.ToolCalls) == 0 && needsTool {
-					a.consecutiveMistakes++
-					if a.consecutiveMistakes >= a.maxConsecutiveMistakes {
-						runErr := fmt.Errorf("max consecutive mistakes reached: model did not use a tool in %d consecutive turns", a.consecutiveMistakes)
-						return a.buildRunResult(run, runErr), runErr
+					if strings.TrimSpace(lastMsg.Content) != "" {
+						a.conversation.SetComplete() // the text IS the answer
+					} else {
+						a.consecutiveMistakes++
+						if a.consecutiveMistakes >= a.maxConsecutiveMistakes {
+							runErr := fmt.Errorf("max consecutive mistakes reached: model returned %d consecutive empty responses", a.consecutiveMistakes)
+							return a.buildRunResult(run, runErr), runErr
+						}
+						a.conversation.AddMessage(types.Message{
+							Role:    types.RoleUser,
+							Content: emptyResponseMsg,
+						})
+						continue // correction round
 					}
-					a.conversation.AddMessage(types.Message{
-						Role:    types.RoleUser,
-						Content: noToolsUsedMsg,
-					})
-					continue // go to next loop iteration instead of falling through
 				}
 			}
 		}
