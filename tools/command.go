@@ -81,11 +81,17 @@ func NewRunToolWithApproval(approve ApprovalHandler) *RunTool {
 			},
 			"requires_approval": {
 				"type": "boolean",
-				"description": "Set true for commands that modify the system — the user is asked before execution (destructive commands are always asked regardless)"
+				"description": "Set true for commands that modify the system."
 			}
 		},
 		"required": ["command"]
 	}`)
+	if approve != nil {
+		// Only promise an approval round-trip when a handler can actually ask.
+		schema = json.RawMessage(strings.Replace(string(schema),
+			`"Set true for commands that modify the system."`,
+			`"Set true for commands that modify the system — the user is asked before execution (destructive commands are always asked regardless)"`, 1))
+	}
 
 	sh := shell.Resolve()
 	var syntax string
@@ -96,6 +102,12 @@ func NewRunToolWithApproval(approve ApprovalHandler) *RunTool {
 		syntax = "This machine has no bash; commands run through cmd.exe. Write cmd syntax: & or a newline instead of &&, %VAR% instead of $VAR, if exist instead of test -f. Native tools (git, go, npm) work as usual."
 	default:
 		syntax = "Commands run under sh: POSIX syntax works (&& chains, $() substitution, $VAR variables)."
+	}
+
+	approvalHint := ""
+	if approve != nil {
+		approvalHint = " Destructive commands (rm/del, git reset --hard, docker rm, shutdown…) " +
+			"and commands with requires_approval ask the user for approval before running."
 	}
 
 	return &RunTool{
@@ -109,9 +121,8 @@ func NewRunToolWithApproval(approve ApprovalHandler) *RunTool {
 					"(whole process tree) and reports the partial output with a timeout note. Stdout and stderr are "+
 					"reported separately, each capped at %dKB (head + tail kept). A non-zero exit code is part of "+
 					"the result, not an error. cwd runs the command in that directory. Do NOT use it to start "+
-					"long-running servers. Destructive commands (rm/del, git reset --hard, docker rm, shutdown…) "+
-					"and commands with requires_approval ask the user for approval before running.",
-				syntax, int(shell.DefaultTimeout/time.Second), shell.MaxOutputBytes/1024),
+					"long-running servers.%s",
+				syntax, int(shell.DefaultTimeout/time.Second), shell.MaxOutputBytes/1024, approvalHint),
 			inputSchema: schema,
 		},
 		approve: approve,
