@@ -357,6 +357,14 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 	// even though the agent and its conversation are reused across runs.
 	run := newRunStats()
 
+	// Mistakes are CONSECUTIVE within a run: a fresh run gets the full
+	// correction budget again. The counter used to live for the agent's
+	// whole lifetime (nothing ever reset it), so one circuit-break poisoned
+	// every later run in the same session — the next run died on its FIRST
+	// empty response with an ever-growing "N consecutive empty responses"
+	// count (observed 3 → 4 → 5 → 6 across successive runs).
+	a.consecutiveMistakes = 0
+
 	// Each new user turn must reopen the conversation loop.
 	a.conversation.MarkIncomplete()
 

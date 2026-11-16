@@ -157,6 +157,15 @@ func (a *BaseAgent) executeToolCalls(ctx context.Context, lastMsg types.Message,
 			}
 		}
 
+		// A tool that ran successfully proves the loop is healthy again:
+		// restore the correction budget. (agent.go's NOTE promises this
+		// reset — it was never actually wired up, so the counter only ever
+		// grew.) Denied/not-allowed tools `continue` above and do NOT count
+		// as success.
+		if execErr == nil {
+			a.consecutiveMistakes = 0
+		}
+
 		// Add tool result to conversation
 		a.conversation.AddMessage(types.Message{
 			Role:       types.RoleTool,

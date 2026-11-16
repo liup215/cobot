@@ -175,6 +175,15 @@ func (t *echoTool) count() int {
 // newTestAgent builds a BaseAgent over a ScriptedProvider with an echo tool
 // and the built-in attempt_completion tool registered.
 func newTestAgent(t *testing.T, turns ...provider.TurnScript) (*BaseAgent, *echoTool) {
+	agent, _, echo := newTestAgentScripted(t, turns...)
+	return agent, echo
+}
+
+// newTestAgentScripted is newTestAgent plus the scripted-provider handle,
+// for tests that must assert HOW MANY model turns a run consumed (the
+// mistake-budget resets are only observable through turn consumption — the
+// breaker text is "3 consecutive" either way).
+func newTestAgentScripted(t *testing.T, turns ...provider.TurnScript) (*BaseAgent, *provider.ScriptedProvider, *echoTool) {
 	t.Helper()
 	prov := provider.NewScriptedProvider(turns...)
 	reg := tools.NewRegistry()
@@ -198,7 +207,7 @@ func newTestAgent(t *testing.T, turns ...provider.TurnScript) (*BaseAgent, *echo
 	if err != nil {
 		t.Fatal(err)
 	}
-	return agent, echo
+	return agent, prov, echo
 }
 
 func completionCall(id, result string) provider.ToolCall {
@@ -375,6 +384,60 @@ func TestConsecutiveEmptyResponsesStopRun(t *testing.T) {
 	// A plain-text reply must never hit this breaker any more.
 	if strings.Contains(err.Error(), "did not use a tool") {
 		t.Fatalf("obsolete no-tool breaker text survived: %v", err)
+	}
+}
+
+// The mistake budget is CONSECUTIVE WITHIN A RUN: the circuit-break ends
+// that run, and the NEXT run starts with a fresh budget. The counter used to
+// live for the agent's whole lifetime (nothing ever reset it), so after the
+// first break every later run in the session died on its FIRST empty
+// response — the error count escalated 3 → 4 → 5 → 6 across successive runs
+// (observed in production: "总是提示错误").
+func TestMistakeBudgetResetsPerRun(t *testing.T) {
+	empty := provider.TurnScript{Content: ""}
+	agent, prov, _ := newTestAgentScripted(t, empty, empty, empty, empty, empty, empty)
+	cb := &recordingCallback{}
+
+	_, err1 := agent.RunWithCallback(context.Background(), "task", cb)
+	if err1 == nil || !strings.Contains(err1.Error(), "3 consecutive empty responses") {
+		t.Fatalf("run 1 error = %v, want the 3-strike breaker", err1)
+	}
+	if got := prov.TurnCount(); got != 3 {
+		t.Fatalf("run 1 consumed %d turns, want 3", got)
+	}
+
+	_, err2 := agent.RunWithCallback(context.Background(), "task", cb)
+	if err2 == nil {
+		t.Fatal("run 2 with three more empty replies must fail")
+	}
+	if !strings.Contains(err2.Error(), "3 consecutive empty responses") {
+		t.Fatalf("run 2 error = %v, want a FRESH 3-strike budget (counter reset at run start)", err2)
+	}
+	if got := prov.TurnCount(); got != 6 {
+		t.Fatalf("after run 2 the provider served %d turns, want 6 — a carried-over counter would break run 2 on its first empty", got)
+	}
+}
+
+// A successful tool execution restores the correction budget mid-run —
+// agent.go's NOTE promises exactly this reset (it was never wired up).
+// Script: two strikes → successful echo (reset) → three more strikes are
+// needed to break. Without the reset the run breaks after the FIRST
+// post-tool empty (4 turns consumed instead of 6).
+func TestToolSuccessRestoresMistakeBudget(t *testing.T) {
+	empty := provider.TurnScript{Content: ""}
+	tool := provider.TurnScript{
+		ToolCalls: []provider.ToolCall{echoCall("c1")},
+		Delay:     30 * time.Millisecond,
+	}
+	agent, prov, _ := newTestAgentScripted(t, empty, empty, tool, empty, empty, empty)
+	cb := &recordingCallback{}
+
+	_, err := agent.RunWithCallback(context.Background(), "task", cb)
+	if err == nil || !strings.Contains(err.Error(), "3 consecutive empty responses") {
+		t.Fatalf("error = %v, want the 3-strike breaker", err)
+	}
+	if got := prov.TurnCount(); got != 6 {
+		t.Fatalf("consumed %d turns, want 6 — the successful echo must restore the budget", got)
 	}
 }
 
