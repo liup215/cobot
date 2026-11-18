@@ -224,3 +224,39 @@ func normalizedFallback(fallback int) int {
 	}
 	return DefaultContextWindow
 }
+
+// ResolveMaxOutputTokens returns the model's per-response output cap with
+// the same refinement rules as ResolveContextWindow: exact vendor+model
+// match, then an exact model-id scan across vendors (legacy entries without
+// a recorded vendor), falling back to fallback — DefaultMaxOutputTokens
+// when fallback is not a positive number.
+//
+// Hosts feed the result into ProviderOptions.MaxTokens: a reasoning model
+// spends most of a response on thinking, and a gateway that does not stream
+// reasoning makes a fixed small cap look like an EMPTY reply (the whole cap
+// is consumed by hidden reasoning — finish_reason=length, zero content).
+func ResolveMaxOutputTokens(vendorName, modelID string, fallback int) int {
+	if vendorName != "" {
+		if v, ok := Lookup(vendorName); ok {
+			for _, m := range v.Models {
+				if m.ID == modelID {
+					return m.MaxOutputTokens
+				}
+			}
+			return normalizedOutputFallback(fallback)
+		}
+	}
+	if modelID != "" {
+		if _, m, ok := FindModelAnywhere(modelID); ok {
+			return m.MaxOutputTokens
+		}
+	}
+	return normalizedOutputFallback(fallback)
+}
+
+func normalizedOutputFallback(fallback int) int {
+	if fallback > 0 {
+		return fallback
+	}
+	return DefaultMaxOutputTokens
+}

@@ -29,6 +29,10 @@ type Active struct {
 	APIKey        string
 	BaseURL       string
 	ContextWindow int
+	// MaxOutputTokens is the model's per-response output cap resolved from
+	// the catalog (0 when neither the catalog nor models.json declares it —
+	// NewProvider then falls back to DefaultMaxTokens).
+	MaxOutputTokens int
 	// Custom reports which side of the split produced the endpoint.
 	Custom bool
 }
@@ -37,7 +41,8 @@ type Active struct {
 // their wire-level policy (user agent, static/dynamic headers, content
 // transforms) through Decorate without leaking host code into resolution.
 type ProviderOptions struct {
-	// MaxTokens is the output cap; <=0 → DefaultMaxTokens.
+	// MaxTokens is the output cap; <=0 → the active model's catalog
+	// MaxOutputTokens, then DefaultMaxTokens.
 	MaxTokens int
 	// Decorate runs on the config after resolution, before registry Create.
 	Decorate func(*provider.ProviderConfig)
@@ -86,13 +91,14 @@ func (s *Store) Resolve() (Active, error) {
 			return Active{}, fmt.Errorf("config: no API key for provider %q (add it to %s)", sel.DefaultProvider, AuthFile)
 		}
 		return Active{
-			ProviderID:    sel.DefaultProvider,
-			Vendor:        sel.DefaultProvider,
-			Model:         model,
-			Kind:          v.Protocol,
-			APIKey:        key,
-			BaseURL:       v.BaseURL,
-			ContextWindow: catalog.ResolveContextWindow(sel.DefaultProvider, model, 0),
+			ProviderID:      sel.DefaultProvider,
+			Vendor:          sel.DefaultProvider,
+			Model:           model,
+			Kind:            v.Protocol,
+			APIKey:          key,
+			BaseURL:         v.BaseURL,
+			ContextWindow:   catalog.ResolveContextWindow(sel.DefaultProvider, model, 0),
+			MaxOutputTokens: catalog.ResolveMaxOutputTokens(sel.DefaultProvider, model, DefaultMaxTokens),
 		}, nil
 	}
 
@@ -123,13 +129,14 @@ func (s *Store) Resolve() (Active, error) {
 		}
 	}
 	return Active{
-		ProviderID:    sel.DefaultProvider,
-		Model:         model,
-		Kind:          kindForAPI(cp.API),
-		APIKey:        cp.APIKey,
-		BaseURL:       cp.BaseURL,
-		ContextWindow: catalog.ResolveContextWindow("", model, declared),
-		Custom:        true,
+		ProviderID:      sel.DefaultProvider,
+		Model:           model,
+		Kind:            kindForAPI(cp.API),
+		APIKey:          cp.APIKey,
+		BaseURL:         cp.BaseURL,
+		ContextWindow:   catalog.ResolveContextWindow("", model, declared),
+		MaxOutputTokens: catalog.ResolveMaxOutputTokens("", model, DefaultMaxTokens),
+		Custom:          true,
 	}, nil
 }
 
@@ -143,6 +150,15 @@ func (s *Store) NewProvider(opts ProviderOptions) (provider.Provider, Active, er
 		return nil, Active{}, err
 	}
 	maxTokens := opts.MaxTokens
+	if maxTokens <= 0 {
+		// The model's OWN output cap from the catalog: reasoning models
+		// spend most of a response on thinking, and a gateway that does
+		// not stream reasoning makes a fixed small cap look like an EMPTY
+		// reply — the whole cap is consumed by hidden reasoning
+		// (finish_reason=length, zero content; observed with opencode
+		// mimo-v2.6-flash at the old 4096 default).
+		maxTokens = act.MaxOutputTokens
+	}
 	if maxTokens <= 0 {
 		maxTokens = DefaultMaxTokens
 	}

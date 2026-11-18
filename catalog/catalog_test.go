@@ -105,6 +105,31 @@ func TestResolveContextWindow(t *testing.T) {
 	}
 }
 
+func TestResolveMaxOutputTokens(t *testing.T) {
+	v, _ := Lookup("anthropic")
+	m := anthropicModel(t, v)
+
+	// vendor + model known → catalog cap (NOT the fallback).
+	if got := ResolveMaxOutputTokens("anthropic", m.ID, 1); got != m.MaxOutputTokens {
+		t.Errorf("vendor+model resolve = %d, want %d", got, m.MaxOutputTokens)
+	}
+	// vendor known, model unknown → fallback (custom model, host owns it).
+	if got := ResolveMaxOutputTokens("anthropic", "my-finetune", 4096); got != 4096 {
+		t.Errorf("vendor-only resolve = %d, want fallback 4096", got)
+	}
+	// vendor empty → global exact-id scan (legacy entries).
+	if got := ResolveMaxOutputTokens("", m.ID, 1); got != m.MaxOutputTokens {
+		t.Errorf("vendorless resolve = %d, want %d", got, m.MaxOutputTokens)
+	}
+	// nothing matches → fallback; non-positive fallback → pi default.
+	if got := ResolveMaxOutputTokens("nope", "nope", 8192); got != 8192 {
+		t.Errorf("miss resolve = %d, want 8192", got)
+	}
+	if got := ResolveMaxOutputTokens("", "", 0); got != DefaultMaxOutputTokens {
+		t.Errorf("cold resolve = %d, want DefaultMaxOutputTokens %d", got, DefaultMaxOutputTokens)
+	}
+}
+
 func TestDefaultsMatchDocumentedSemantics(t *testing.T) {
 	if DefaultContextWindow != 128000 {
 		t.Errorf("DefaultContextWindow = %d, pi documents 128000", DefaultContextWindow)

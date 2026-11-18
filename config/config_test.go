@@ -212,14 +212,59 @@ func TestNewProviderBuildsWithResolvedConfig(t *testing.T) {
 		t.Errorf("provider built with unresolved config: base=%q key=%q model=%q",
 			seen.BaseURL, seen.APIKey, seen.Model)
 	}
-	if seen.MaxTokens != DefaultMaxTokens {
-		t.Errorf("default output cap = %d, want %d", seen.MaxTokens, DefaultMaxTokens)
+	// The output cap follows the ACTIVE MODEL's catalog entry now: mimo is a
+	// reasoning model and the gateway does not stream reasoning, so the old
+	// fixed 4096 default let hidden thinking eat the whole budget
+	// (finish=length → zero content → the loop's "empty response" breaker).
+	want := DefaultMaxTokens
+	for _, m := range v.Models {
+		if m.ID == "mimo-v2.6-flash" {
+			want = m.MaxOutputTokens
+		}
+	}
+	if want == 0 {
+		t.Fatal("catalog must declare mimo-v2.6-flash's MaxOutputTokens")
+	}
+	if seen.MaxTokens != want {
+		t.Errorf("default output cap = %d, want the model's catalog cap %d", seen.MaxTokens, want)
 	}
 	if seen.Headers["User-Agent"] != "host-app" {
 		t.Error("decorator hook not applied")
 	}
 	if act.ContextWindow < 1_000_000 {
 		t.Errorf("active window = %d, want the catalog's 1M", act.ContextWindow)
+	}
+}
+
+// A custom endpoint whose model the catalog does not know keeps the
+// conservative DefaultMaxTokens (the pre-existing behaviour): only
+// catalog-known models get their true cap, so raising the default can never
+// push an unknown gateway past its limit.
+func TestNewProviderUnknownCustomModelKeepsConservativeCap(t *testing.T) {
+	s := openStore(t)
+	if err := s.UpsertCustomProvider("depu", CustomProvider{
+		BaseURL: "https://gateway.ai.depu.school",
+		API:     "openai-completions",
+		APIKey:  "sk-test",
+		Models:  []CustomModel{{ID: "llm-ultra", ContextWindow: 128000}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDefault("depu", "llm-ultra"); err != nil {
+		t.Fatal(err)
+	}
+	var seen provider.ProviderConfig
+	p, act, err := s.NewProvider(ProviderOptions{
+		Decorate: func(c *provider.ProviderConfig) { seen = *c },
+	})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	if p == nil || !act.Custom {
+		t.Fatalf("want a custom provider build, got custom=%v nil=%v", act.Custom, p == nil)
+	}
+	if seen.MaxTokens != DefaultMaxTokens {
+		t.Errorf("unknown custom model cap = %d, want the conservative %d", seen.MaxTokens, DefaultMaxTokens)
 	}
 }
 
