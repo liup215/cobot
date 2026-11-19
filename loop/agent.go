@@ -396,6 +396,12 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 		}
 	}
 
+	// Mid-stream transient failures get their own retry budget: consecutive
+	// failed attempts for the current request, reset whenever a stream
+	// completes. Kept separate from consecutiveMistakes so network blips can
+	// never eat the empty-response correction budget.
+	streamRetries := 0
+
 	// Main conversation loop
 	for !a.abort.Load() {
 		if res, err, canceled := a.canceledRunResult(ctx, run, callback); canceled {
@@ -502,16 +508,45 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 		callback.OnStreamStart()
 
 		// Process the stream
-		if err := a.processStream(ctx, streamChan, callback, run); err != nil {
+		if delivered, err := a.processStream(ctx, streamChan, callback, run); err != nil {
 			// Cancellation wins over a mid-stream error, so an interrupted run
 			// always surfaces the wrapped context error to the caller.
 			if res, cerr, canceled := a.canceledRunResult(ctx, run, callback); canceled {
 				return res, cerr
 			}
+			// Transient network failure mid-read (connection reset by the
+			// gateway/CDN — e.g. Cloudflare's ~100s idle cut on a long
+			// thinking gap). The failed attempt appended NOTHING to the
+			// conversation, so re-issuing the same request is exactly what
+			// the user would do by typing "继续" — automatic and invisible.
+			// Only attempts that delivered NO complete tool call qualify: a
+			// delivered call may already be pre-dispatched, and re-asking
+			// could duplicate its side effects.
+			delays := retryDelaysFor(a.retryDelays)
+			if delivered == 0 && streamRetries < len(delays) && provider.IsRetryable(err) {
+				streamRetries++
+				delay := delays[streamRetries-1]
+				if he, ok := provider.AsHTTPError(err); ok && he.RetryAfter > delay {
+					delay = he.RetryAfter
+				}
+				logWarnf("Stream died mid-read (attempt %d/%d): %v — retrying in %v",
+					streamRetries, len(delays), err, delay)
+				callback.OnRetry(streamRetries, err, delay)
+				select {
+				case <-ctx.Done():
+					if res, cerr, canceled := a.canceledRunResult(ctx, run, callback); canceled {
+						return res, cerr
+					}
+					return a.buildRunResult(run, ctx.Err()), ctx.Err()
+				case <-time.After(delay):
+				}
+				continue
+			}
 			a.failTask(err.Error())
 			callback.OnError(err)
 			return a.buildRunResult(run, err), err
 		}
+		streamRetries = 0 // completed stream — the next request gets a fresh budget
 		run.turns++
 
 		// Save assistant message to storage, attaching the list of tools that

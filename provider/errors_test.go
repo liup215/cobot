@@ -1,8 +1,11 @@
 package provider
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"testing"
 	"time"
 )
@@ -57,6 +60,35 @@ func TestAsHTTPErrorAndIsRetryable(t *testing.T) {
 	}
 	if _, ok := AsHTTPError(plain); ok {
 		t.Error("AsHTTPError(plain) should not match")
+	}
+}
+
+// Transient network failures — a connection reset while reading an SSE
+// stream (the "error reading stream: read tcp … wsarecv: … forcibly closed"
+// class observed against Cloudflare-fronted gateways), truncated responses
+// and wrapped variants — are retryable; context cancellation and deadline
+// are not, even when they arrive wrapped in a net.Error.
+func TestIsRetryableNetworkFailures(t *testing.T) {
+	reset := &net.OpError{
+		Op:  "read",
+		Net: "tcp",
+		Err: errors.New("wsarecv: An existing connection was forcibly closed by the remote host"),
+	}
+	streamErr := fmt.Errorf("error reading stream: %w", reset)
+	if !IsRetryable(streamErr) {
+		t.Error("IsRetryable(mid-stream reset) = false, want true")
+	}
+	if !IsRetryable(io.ErrUnexpectedEOF) {
+		t.Error("IsRetryable(ErrUnexpectedEOF) = false, want true")
+	}
+	if !IsRetryable(fmt.Errorf("truncated: %w", io.ErrUnexpectedEOF)) {
+		t.Error("IsRetryable(wrapped ErrUnexpectedEOF) = false, want true")
+	}
+	if IsRetryable(fmt.Errorf("ctx: %w", context.Canceled)) {
+		t.Error("IsRetryable(context.Canceled) = true, want false")
+	}
+	if IsRetryable(fmt.Errorf("ctx: %w", context.DeadlineExceeded)) {
+		t.Error("IsRetryable(context.DeadlineExceeded) = true, want false")
 	}
 }
 

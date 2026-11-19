@@ -1,8 +1,11 @@
 package provider
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 
 	"strings"
@@ -62,14 +65,32 @@ func AsHTTPError(err error) (*HTTPError, bool) {
 	return nil, false
 }
 
-// IsRetryable reports whether err is worth retrying. Only *HTTPError values
-// (or chains containing one) participate; any other error type is considered
-// permanent.
+// IsRetryable reports whether err is worth retrying.
+//
+//   - *HTTPError chains participate per Retryable() (network/setup failures,
+//     408/429, 5xx).
+//   - Transient NETWORK failures are retryable too: a connection reset
+//     while reading an SSE stream ("error reading stream: read tcp …
+//     wsarecv: … forcibly closed") says nothing about the request itself —
+//     it is the gateway/CDN or the path dropping the connection. net.Error
+//     (dial/read OpError, url.Error) and truncated responses
+//     (io.ErrUnexpectedEOF) cover this class.
+//   - Context cancellation/deadline and everything else are permanent.
 func IsRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	if he, ok := AsHTTPError(err); ok {
 		return he.Retryable()
 	}
-	return false
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne)
 }
 
 // parseRetryAfter parses the Retry-After header in delta-seconds form

@@ -13,11 +13,17 @@ import (
 // processStream handles the streaming response from the LLM. run receives the
 // per-run accounting (turn usage); it is owned by the calling goroutine.
 //
+// The first return value reports how many COMPLETE tool calls this attempt
+// delivered to the callback (pre-dispatch may already have executed them) —
+// the run loop uses it as the safety valve for mid-stream retries: an
+// interrupted attempt that delivered a complete tool call must NOT be
+// silently re-issued, or side-effectful calls could run twice.
+//
 // The read is cancellable: when ctx is done the remaining stream is abandoned
 // (drained in the background so the provider's pump goroutine can finish) and
 // the interrupted turn is not recorded — the caller reports the wrapped
 // context error.
-func (a *BaseAgent) processStream(ctx context.Context, streamChan <-chan StreamChunk, callback StreamCallback, run *runStats) error {
+func (a *BaseAgent) processStream(ctx context.Context, streamChan <-chan StreamChunk, callback StreamCallback, run *runStats) (int, error) {
 	var content strings.Builder
 	var reasoning strings.Builder
 	var toolCalls []ToolCall
@@ -38,7 +44,7 @@ streamLoop:
 			// goroutine — which may block sending into an unbuffered channel
 			// — can finish and release the connection.
 			go drainStream(streamChan)
-			return ctx.Err()
+			return len(toolCalls), ctx.Err()
 		case chunk, ok := <-streamChan:
 			if !ok {
 				// Provider closed the stream (some providers close without a
@@ -47,7 +53,7 @@ streamLoop:
 			}
 
 			if chunk.Error != nil {
-				return chunk.Error
+				return len(toolCalls), chunk.Error
 			}
 
 			logDebugf("processStream chunk: content=%d reasoning=%d toolCall=%v done=%v",
@@ -171,7 +177,7 @@ streamLoop:
 	// assembly reads this capture, not the (compaction-prone) transcript.
 	run.recordAssistantTurn(fullContent, typesToolCalls)
 
-	return nil
+	return len(toolCalls), nil
 }
 
 // drainStream consumes the remaining chunks of an abandoned stream until the

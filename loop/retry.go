@@ -30,9 +30,11 @@ func retryDelaysFor(configured []time.Duration) []time.Duration {
 
 // createStreamWithRetry opens the LLM stream with automatic retries for
 // transient connection failures (network errors, 408/429, 5xx; honoring
-// Retry-After hints). 4xx parameter errors and mid-stream errors are NOT
-// retried here — the former are permanent, the latter flow through the
-// correction loop as usual.
+// Retry-After hints). 4xx parameter errors are permanent and are NOT
+// retried here. MID-STREAM failures are not handled here either — the run
+// loop retries them with this same schedule once the attempt is known to
+// have delivered no complete tool call (see the processStream error branch
+// in agent.go).
 //
 // Each retry reports OnRetry(attempt, err, nextDelay) so callers can show
 // progress. Context cancellation during a backoff wait aborts immediately.
