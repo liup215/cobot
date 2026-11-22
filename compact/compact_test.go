@@ -1041,24 +1041,24 @@ func (noRowChangeTrim) Compact(_ context.Context, conv *types.Conversation) (Res
 func TestTrimKeepWindowShrinksToFit(t *testing.T) {
 	exactEstimator(t)
 
-	if got := fitKeepRounds(nil, nil, 6, 100); got != 6 {
-		t.Errorf("fitKeepRounds on an empty transcript = %d, want the configured 6", got)
+	if got := keepWindow(nil, nil, 6, 0, 100); got != 6 {
+		t.Errorf("keepWindow on an empty transcript = %d, want the configured 6", got)
 	}
 	// A single round can never be dropped: the keep window collapses to 0.
 	single := SplitRounds(fillerRounds(1, 10))
-	if got := fitKeepRounds(fillerRounds(1, 10), single, 6, 10); got != 0 {
-		t.Errorf("fitKeepRounds with one round = %d, want 0", got)
+	if got := keepWindow(fillerRounds(1, 10), single, 6, 0, 10); got != 0 {
+		t.Errorf("keepWindow with one round = %d, want 0", got)
 	}
 	// Rounds too big to fit: the window shrinks to the newest one.
 	body := fillerRounds(10, 100) // ~200 tokens per round
 	rounds := SplitRounds(body)
-	if got := fitKeepRounds(body, rounds, 6, 300); got != 1 {
-		t.Errorf("fitKeepRounds with oversized rounds = %d, want 1", got)
+	if got := keepWindow(body, rounds, 6, 0, 300); got != 1 {
+		t.Errorf("keepWindow with oversized rounds = %d, want 1", got)
 	}
 	// Rounds that fit keep the configured window, capped so something is left
 	// to drop.
-	if got := fitKeepRounds(body, rounds, 6, 100000); got != 6 {
-		t.Errorf("fitKeepRounds when everything fits = %d, want 6", got)
+	if got := keepWindow(body, rounds, 6, 0, 100000); got != 6 {
+		t.Errorf("keepWindow when everything fits = %d, want 6", got)
 	}
 
 	// End to end: 3 huge rounds in a small window. KeepRounds 6 would protect
@@ -1214,4 +1214,108 @@ func intsToStrings(in []int) []string {
 		out[i] = fmt.Sprint(v)
 	}
 	return out
+}
+
+// TestCompactionFreesTheWindowByTokensNotByRounds pins the treadmill that
+// makes a long desktop session look frozen at ~100% of its context window.
+//
+// A tool-heavy session produces rounds that are individually enormous (a file
+// dump, a test log). With a round-count window the strategy happily keeps the
+// newest six — which is the entire context window — so it can never free
+// anything, and the loop either re-runs it on every iteration or falls back to
+// the ephemeral hard trim. The session then sits at the window limit forever
+// and the model's visible context never shrinks, no matter how many times the
+// UI announces a compaction.
+//
+// pi sizes the kept window in tokens (keepRecentTokens ≈ 20k) instead of
+// rounds; the same compaction then drops ~85% of the window. This test pins
+// that property for both built-in strategies.
+func TestCompactionFreesTheWindowByTokensNotByRounds(t *testing.T) {
+	exactEstimator(t)
+
+	// 7 rounds of ~20k tokens each in a 128k window: the newest six alone are
+	// 120k — 94% of the window, well over the 80% watermark.
+	const roundTokens = 10000
+	hugeRounds := func(n int) []types.Message {
+		msgs := protectedMessages()
+		for i := 1; i <= n; i++ {
+			msgs = append(msgs, types.Message{Role: types.RoleUser, Content: fmt.Sprintf("round-%d ", i) + strings.Repeat("u", roundTokens)})
+			msgs = append(msgs, types.Message{Role: types.RoleAssistant, Content: fmt.Sprintf("answer-%d ", i) + strings.Repeat("a", roundTokens)})
+		}
+		return msgs
+	}
+
+	t.Run("summarize", func(t *testing.T) {
+		conv := buildConv(128000, hugeRounds(7)...)
+		before := conv.GetTotalTokens()
+		if before < 128000 {
+			t.Fatalf("fixture is not over the window: %d", before)
+		}
+		strategy := &Summarize{Summarizer: &fakeSummarizer{summary: "Task goal: keep going"}}
+		res, err := strategy.Compact(context.Background(), conv)
+		if err != nil {
+			t.Fatalf("Summarize: %v", err)
+		}
+		if !res.Anchorable {
+			t.Fatalf("summary result is not anchorable")
+		}
+		after := conv.GetTotalTokens()
+		if after > conv.MaxTokens/4 {
+			t.Fatalf("summarize left %d/%d tokens (%.0f%% of the window): the kept window is sized by round count, "+
+				"so the compaction cannot free the session", after, conv.MaxTokens, 100*float64(after)/float64(conv.MaxTokens))
+		}
+		// The newest round must survive verbatim: it is the working state.
+		if !strings.Contains(lastContent(conv), "answer-7") {
+			t.Fatalf("the newest round did not survive: %q", lastContent(conv))
+		}
+	})
+
+	t.Run("trim", func(t *testing.T) {
+		conv := buildConv(128000, hugeRounds(7)...)
+		strategy := &Trim{}
+		if _, err := strategy.Compact(context.Background(), conv); err != nil {
+			t.Fatalf("Trim: %v", err)
+		}
+		if after := conv.GetTotalTokens(); after > conv.MaxTokens/4 {
+			t.Fatalf("trim left %d/%d tokens: kept window is sized by round count", after, conv.MaxTokens)
+		}
+	})
+}
+
+// lastContent returns the content of the conversation's last message.
+func lastContent(conv *types.Conversation) string {
+	if len(conv.Messages) == 0 {
+		return ""
+	}
+	return conv.Messages[len(conv.Messages)-1].Content
+}
+
+// TestSummarizeTranscriptKeepsThePreviousSummary pins the multi-compaction
+// case: the carried-forward summary of the previous compaction sits at the
+// FRONT of the transcript, so a budget cut taken from the front (oldest first)
+// would delete it — each further compaction would then be strictly lossier
+// than the last, and after a few rounds the model has no record of the session
+// at all (the "it keeps compacting but the model still forgets everything"
+// symptom). pi keeps it in a <previous-summary> block; here it is reserved
+// before the newest messages are fitted into the rest of the budget.
+func TestSummarizeTranscriptKeepsThePreviousSummary(t *testing.T) {
+	exactEstimator(t)
+
+	prev := "[COMPACTED] Early conversation summarized: the 4 oldest round(s) (10 messages) were replaced by the summary below. " +
+		"Treat it as the record of what already happened.\n\nTask goal: keep the desktop agent honest about its token budget"
+	msgs := append([]types.Message{{Role: types.RoleUser, Content: prev}}, fillerRounds(6, 4000)...)
+
+	out := renderTranscript(msgs, 6000) // far below the transcript size
+	if !strings.Contains(out, "Task goal: keep the desktop agent honest") {
+		t.Fatalf("the carried-forward summary was dropped from the transcript:\n%s", out)
+	}
+	if !strings.Contains(out, "round-6 ") {
+		t.Fatalf("the newest round is missing from the transcript:\n%s", out)
+	}
+	if strings.Contains(out, "round-1 ") {
+		t.Fatalf("the oldest round should have been omitted:\n%s", out)
+	}
+	if !strings.Contains(out, "older message(s) omitted") {
+		t.Fatalf("the omission marker is missing:\n%s", out)
+	}
 }

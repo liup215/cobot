@@ -76,9 +76,17 @@ type Summarize struct {
 	// DefaultSummarizePrompt. The transcript is always appended after it.
 	Prompt string
 
-	// KeepRounds is the number of most-recent rounds kept verbatim.
+	// KeepRounds is the legacy count-based window: the number of most-recent
+	// rounds kept verbatim when KeepRecentTokens is 0.
 	// 0 = DefaultKeepRounds.
 	KeepRounds int
+
+	// KeepRecentTokens is the token-sized verbatim window (pi's
+	// keepRecentTokens): the newest rounds are kept until they accumulate
+	// this budget, everything older is summarized. 0 = the pi default
+	// (DefaultKeepRecentTokens), which makes every compaction free the
+	// session down to ~20k instead of leaving it at the watermark.
+	KeepRecentTokens int
 
 	// LowWatermarkPercent triggers compaction above this percentage of
 	// MaxTokens. 0 = DefaultLowWatermarkPercent.
@@ -116,6 +124,13 @@ func (s *Summarize) keepRounds() int {
 		return DefaultKeepRounds
 	}
 	return s.KeepRounds
+}
+
+func (s *Summarize) keepRecentTokens() int {
+	if s.KeepRecentTokens <= 0 {
+		return DefaultKeepRecentTokens
+	}
+	return s.KeepRecentTokens
 }
 
 func (s *Summarize) lowWatermark() int {
@@ -159,7 +174,7 @@ func (s *Summarize) ShouldCompact(conv *types.Conversation) bool {
 	}
 	body := conv.Messages[systemPrefix(conv):]
 	rounds := SplitRounds(body)
-	keep := fitKeepRounds(body, rounds, s.keepRounds(), watermark(conv, s.lowWatermark()))
+	keep := keepWindow(body, rounds, s.keepRounds(), s.keepRecentTokens(), watermark(conv, s.lowWatermark()))
 	return len(rounds) > keep && keep > 0
 }
 
@@ -177,7 +192,7 @@ func (s *Summarize) Compact(ctx context.Context, conv *types.Conversation) (Resu
 	body := conv.Messages[sys:]
 	preLen := len(conv.Messages) // the shape the result's indices address
 	rounds := SplitRounds(body)
-	keep := fitKeepRounds(body, rounds, s.keepRounds(), watermark(conv, s.lowWatermark()))
+	keep := keepWindow(body, rounds, s.keepRounds(), s.keepRecentTokens(), watermark(conv, s.lowWatermark()))
 	if len(rounds) <= keep || keep == 0 {
 		return Result{}, nil // nothing outside the protected window
 	}
@@ -329,6 +344,11 @@ func renderMessage(m types.Message, names map[string]string) string {
 // (estimated). When the budget forces a cut, the oldest messages are dropped
 // from the transcript — the newest ones sit next to the retained rounds and
 // are the most valuable for continuing the task.
+//
+// The one exception is a leading compaction notice: it is the summary of every
+// earlier compaction, so dropping it would erase the long-term record of the
+// session and make each further compaction strictly lossier than the last.
+// Its cost is reserved first, then the newest messages fill the rest.
 func renderTranscript(msgs []types.Message, budgetTokens int) string {
 	if len(msgs) == 0 {
 		return "(nothing to summarize)"
@@ -336,8 +356,9 @@ func renderTranscript(msgs []types.Message, budgetTokens int) string {
 	names := toolNames(msgs)
 
 	type rendered struct {
-		text   string
-		tokens int
+		text    string
+		carried bool // a previous compaction's summary: never dropped
+		tokens  int
 	}
 	items := make([]rendered, 0, len(msgs))
 	for i := range msgs {
@@ -345,28 +366,48 @@ func renderTranscript(msgs []types.Message, budgetTokens int) string {
 		if strings.TrimSpace(text) == "" {
 			continue
 		}
-		items = append(items, rendered{text: text, tokens: types.Estimator(text)})
+		items = append(items, rendered{
+			text:    text,
+			carried: len(items) == 0 && isCompactionNotice(msgs[i]),
+			tokens:  types.Estimator(text),
+		})
 	}
 	if len(items) == 0 {
 		return "(nothing to summarize)"
 	}
 
-	keep := 0
 	used := 0
-	for i := len(items) - 1; i >= 0; i-- {
-		if keep > 0 && used+items[i].tokens > budgetTokens {
-			break
-		}
-		used += items[i].tokens
+	keep := 0
+	if items[0].carried {
+		used += items[0].tokens
 		keep++
 	}
-	omitted := len(items) - keep
+	from := len(items) - 1
+	for ; from > keep; from-- {
+		if used+items[from].tokens > budgetTokens {
+			from++
+			break
+		}
+		used += items[from].tokens
+	}
+	if from < keep {
+		from = keep
+	}
+	window := items[from:]
+	omitted := len(items) - keep - len(window)
 
 	var b strings.Builder
 	if omitted > 0 {
 		fmt.Fprintf(&b, "(%d older message(s) omitted from this transcript to fit the summarizer budget)\n\n", omitted)
 	}
-	for _, it := range items[len(items)-keep:] {
+	if keep > 0 {
+		b.WriteString(items[0].text)
+		b.WriteString("\n\n")
+		if len(window) > 0 {
+			b.WriteString("...\n\n")
+		}
+	}
+	for _, it := range window {
 		b.WriteString(it.text)
 		b.WriteString("\n\n")
 	}

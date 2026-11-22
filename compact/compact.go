@@ -41,6 +41,20 @@ const (
 	// trimmed or summarized away.
 	DefaultKeepRounds = 6
 
+	// DefaultKeepRecentTokens is the size (in tokens) of the verbatim window
+	// the built-in strategies keep when they compact — the pi
+	// `keepRecentTokens` knob. The newest rounds are kept until they
+	// accumulate this budget, and everything older is summarized/trimmed.
+	//
+	// It is a FIXED budget, deliberately not a fraction of the context
+	// window: a compaction sized as "keep up to the watermark" leaves the
+	// session exactly as full as it found it, so the next pre-send check
+	// trips again, compacts again, and frees nothing — while the model keeps
+	// carrying a working set that is the whole window. pi keeps ~20k of
+	// verbatim recent turns and frees the rest on every compaction; that is
+	// the behaviour this default reproduces.
+	DefaultKeepRecentTokens = 20000
+
 	// DefaultLowWatermarkPercent triggers compaction once the conversation
 	// exceeds 60% of MaxTokens (the loop's budget-check hook).
 	DefaultLowWatermarkPercent = 60
@@ -200,29 +214,68 @@ func SplitRounds(msgs []types.Message) []Round {
 	return rounds
 }
 
-// fitKeepRounds returns how many of the most-recent rounds may be kept
-// verbatim so that the kept window still fits inside limit tokens.
+// keepWindow returns how many of the most-recent rounds a strategy keeps
+// verbatim. It is the stricter of two independent windows:
 //
-// keep is the strategy's configured window; it is lowered (never below 1)
-// while the newest rounds alone exceed limit, and it is capped at len(rounds)-1
-// so a conversation that is over budget always has at least one round to drop.
-// Without this a session whose last few rounds are enormous (a long tool
-// transcript, a pasted paper) sits permanently above the watermark: the
-// strategy cannot free anything, the loop hard-trims down to the limit and
-// compacts again on the very next iteration — the "context never gets better
-// across turns" treadmill.
-func fitKeepRounds(body []types.Message, rounds []Round, keep, limit int) int {
+//   - the count window (keepRounds, the legacy knob): at most N recent
+//     rounds, and
+//   - the token window (keepTokens, pi's keepRecentTokens): walk backwards
+//     from the newest round accumulating estimated tokens and stop once the
+//     window has grown to the budget.
+//
+// Taking the minimum is what makes a compaction actually free the session.
+// With the count window alone, six tool-heavy rounds can be the whole context
+// window: the strategy then has nothing it is allowed to drop, leaves the
+// session exactly as full as it found it, and the next pre-send check trips
+// again — the "it keeps compacting and nothing changes" treadmill. pi sizes
+// its kept window in TOKENS (~20k) rather than in rounds for exactly this
+// reason.
+//
+// Two invariants survive both modes:
+//   - at least one round is kept (an empty window would delete the current
+//     working state), and
+//   - at most len(rounds)-1 rounds are kept, so a conversation that is over
+//     budget always has something left to drop.
+//
+// limit is the hard ceiling (normally the low watermark): the window is
+// shrunk further while the newest rounds alone exceed it, which keeps a
+// single enormous round from pinning the session above the watermark.
+func keepWindow(body []types.Message, rounds []Round, keepRounds, keepTokens, limit int) int {
 	if len(rounds) == 0 {
-		return keep
+		return keepRounds
 	}
-	if keep >= len(rounds) {
-		keep = len(rounds) - 1
-	} else if len(rounds) > 1 && keep < 1 {
-		keep = 1
-	}
-	if keep < 1 {
+	last := len(rounds) - 1
+	if last < 1 {
 		return 0 // a single round: nothing can be dropped
 	}
+
+	keep := keepRounds
+	if keep > last {
+		keep = last
+	} else if keep < 1 {
+		keep = 1
+	}
+
+	if keepTokens > 0 {
+		// pi-style walk-back: how many of the newest rounds it takes to
+		// accumulate the budget (always at least one, never all of them).
+		tokenKeep := 0
+		acc := 0
+		for tokenKeep < last {
+			r := rounds[len(rounds)-1-tokenKeep]
+			for _, m := range body[r.Start:r.End] {
+				acc += types.MessageTokens(m)
+			}
+			tokenKeep++
+			if acc >= keepTokens {
+				break
+			}
+		}
+		if tokenKeep < keep {
+			keep = tokenKeep
+		}
+	}
+
 	for keep > 1 {
 		kept := 0
 		for _, m := range body[rounds[len(rounds)-keep].Start:] {
@@ -234,6 +287,24 @@ func fitKeepRounds(body []types.Message, rounds []Round, keep, limit int) int {
 		keep--
 	}
 	return keep
+}
+
+// isCompactionNotice reports whether a message is the row an earlier
+// compaction left behind — the carried-forward summary (Summarize's
+// "[COMPACTED] ..." header or Trim's "[Context compacted ...]" notice).
+//
+// Those rows sit at the FRONT of the transcript, so a second compaction of a
+// long session would summarize them last (see renderTranscript) and could drop
+// them from the summarizer's own budget — silently throwing away everything the
+// previous compactions had distilled. pi keeps the previous summary in a
+// <previous-summary> block and tells the model to preserve it; the strategies
+// here must at least never truncate it away.
+func isCompactionNotice(m types.Message) bool {
+	if m.Role != types.RoleUser {
+		return false
+	}
+	c := strings.TrimSpace(m.Content)
+	return strings.HasPrefix(c, "[COMPACTED]") || strings.HasPrefix(c, "[Context compacted")
 }
 
 // systemPrefix returns the number of leading system messages (0 or 1) that

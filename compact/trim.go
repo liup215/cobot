@@ -47,9 +47,15 @@ type Trim struct {
 	// percentage of MaxTokens. 0 = DefaultHighWatermarkPercent.
 	HighWatermarkPercent int
 
-	// KeepRounds is the number of most-recent rounds that are never
-	// trimmed. 0 = DefaultKeepRounds.
+	// KeepRounds is the legacy count-based window: the number of most-recent
+	// rounds that are never trimmed when KeepRecentTokens is 0.
+	// 0 = DefaultKeepRounds.
 	KeepRounds int
+
+	// KeepRecentTokens is the token-sized verbatim window (pi's
+	// keepRecentTokens): the newest rounds are kept until they accumulate
+	// this budget, everything older is dropped. 0 = DefaultKeepRecentTokens.
+	KeepRecentTokens int
 }
 
 // NewTrim returns a Trim strategy with the default watermarks.
@@ -87,6 +93,14 @@ func (t *Trim) keepRounds() int {
 	return t.KeepRounds
 }
 
+// keepRecentTokens resolves the configured token-sized window.
+func (t *Trim) keepRecentTokens() int {
+	if t.KeepRecentTokens <= 0 {
+		return DefaultKeepRecentTokens
+	}
+	return t.KeepRecentTokens
+}
+
 // ShouldCompact reports whether the conversation is above the low watermark
 // AND there is something this strategy could actually do: at least one round
 // outside the protected window, or — above the high watermark — the hard trim.
@@ -116,7 +130,7 @@ func (t *Trim) ShouldCompact(conv *types.Conversation) bool {
 // whose only droppable round is the tiny task turn is not "compactable", and
 // the loop does not announce a compaction that changes nothing.
 //
-// The keep window is budget-aware (see fitKeepRounds): when the newest rounds
+// The keep window is budget-aware (see keepWindow): when the newest rounds
 // alone exceed the low watermark the window shrinks instead of pinning the
 // conversation above it forever.
 func (t *Trim) hasCompactableRound(conv *types.Conversation) bool {
@@ -163,7 +177,7 @@ func (t *Trim) planDrop(conv *types.Conversation) (trimPlan, bool) {
 	body := conv.Messages[sys:]
 	rounds := SplitRounds(body)
 
-	keep := fitKeepRounds(body, rounds, t.keepRounds(), watermark(conv, t.lowWatermark()))
+	keep := keepWindow(body, rounds, t.keepRounds(), t.keepRecentTokens(), watermark(conv, t.lowWatermark()))
 	if keep == 0 || len(rounds) <= keep {
 		return trimPlan{}, false // only the hard trim can help
 	}
@@ -199,8 +213,13 @@ func (t *Trim) planDrop(conv *types.Conversation) (trimPlan, bool) {
 		return msgs, tokens
 	}
 
-	// Drop leading rounds oldest-first, stopping as soon as the projected
-	// total is back below the low watermark.
+	// Drop the whole window that sits outside the keep budget, oldest-first.
+	//
+	// The cut is the keep boundary itself, not "whatever it takes to get back
+	// under the low watermark": stopping at the last round needed leaves the
+	// session sitting at the watermark, which is exactly what the next
+	// pre-send check trips again. pi cuts at its keepRecentTokens boundary for
+	// the same reason — one compaction should buy many turns, not one.
 	low := watermark(conv, t.lowWatermark())
 	current := 0
 	for _, m := range conv.Messages {
@@ -217,10 +236,11 @@ func (t *Trim) planDrop(conv *types.Conversation) (trimPlan, bool) {
 			}
 			droppedMessages++
 		}
-		msgs, projected = candidate(cut, droppedRounds, droppedMessages)
-		if projected <= low {
-			break
-		}
+	}
+	msgs, projected = candidate(cut, droppedRounds, droppedMessages)
+	if projected > low {
+		slog.Debug("compact: trim window alone is still above the low watermark",
+			"projected", projected, "low", low)
 	}
 
 	// Nothing gained (e.g. only the protected task message sat in the dropped
