@@ -104,32 +104,6 @@ func TestConversationTrimToMaxTokens(t *testing.T) {
 	}
 }
 
-func TestConversationTrimPreservesToolHint(t *testing.T) {
-	c := NewConversation()
-	c.MaxTokens = 80
-	c.AddMessage(Message{Role: RoleSystem, Content: "sys"})
-	big := make([]byte, 1000)
-	for i := range big {
-		big[i] = 'x'
-	}
-	c.AddMessage(Message{Role: RoleUser, Content: "task"})
-	c.AddMessage(Message{Role: RoleTool, ToolCallID: "call_1", Content: string(big)})
-	c.AddMessage(Message{Role: RoleAssistant, Content: "ok"})
-	c.AddMessage(Message{Role: RoleUser, Content: "next"})
-
-	c.TrimToMaxTokens()
-
-	found := false
-	for _, m := range c.Messages {
-		if m.Role == RoleTool && contains(m.Content, "truncated by context manager") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected a tool placeholder hint after trimming, messages=%d", c.MessageCount())
-	}
-}
-
 func TestConversationAutoCompactWatermarks(t *testing.T) {
 	c := NewConversation()
 	c.MaxTokens = 1000
@@ -265,5 +239,55 @@ func TestPatchMessageContent(t *testing.T) {
 	// Same content = no-op success (idempotent stubbing).
 	if !c.PatchMessageContent(0, patched) {
 		t.Fatal("idempotent patch failed")
+	}
+}
+
+func TestConversationNeverManglesAToolResult(t *testing.T) {
+	c := NewConversation()
+	c.MaxTokens = 80
+	c.AddMessage(Message{Role: RoleSystem, Content: "sys"})
+	big := make([]byte, 1000)
+	for i := range big {
+		big[i] = 'x'
+	}
+	c.AddMessage(Message{Role: RoleUser, Content: "task"})
+	c.AddMessage(Message{Role: RoleAssistant, Content: "calling"})
+	c.AddMessage(Message{Role: RoleTool, ToolCallID: "call_1", Content: string(big)})
+	c.AddMessage(Message{Role: RoleAssistant, Content: "ok"})
+	c.AddMessage(Message{Role: RoleUser, Content: "next"})
+
+	c.TrimToMaxTokens()
+
+	// Trimming may drop the round this result belongs to, but a tool row that
+	// SURVIVES must still carry exactly what the tool returned: the model reads
+	// tool output as evidence, so a truncated copy silently changes the answer.
+	for _, m := range c.Messages {
+		if m.Role != RoleTool {
+			continue
+		}
+		if m.Content != string(big) {
+			t.Fatalf("surviving tool result was altered: %d chars (want %d)", len(m.Content), len(big))
+		}
+	}
+}
+
+func TestAppendNeverTruncatesAToolResult(t *testing.T) {
+	c := NewConversation() // PerMessageSoftCap = 6000
+	big := make([]byte, 40000)
+	for i := range big {
+		big[i] = 'q'
+	}
+	c.AddMessage(Message{Role: RoleUser, Content: "search"})
+	c.AddMessage(Message{Role: RoleAssistant, Content: "calling"})
+	c.AddMessage(Message{Role: RoleTool, ToolCallID: "call_1", Content: string(big)})
+
+	last := c.GetLastMessage()
+	if last.Content != string(big) {
+		t.Fatalf("append capped a tool result: %d chars kept of %d", len(last.Content), len(big))
+	}
+	// Dialogue still gets the soft cap — that half of the setting is intentional.
+	c.AddMessage(Message{Role: RoleAssistant, Content: string(big)})
+	if got := len(c.GetLastMessage().Content); got >= len(big) {
+		t.Fatalf("assistant content was not capped: %d chars", got)
 	}
 }

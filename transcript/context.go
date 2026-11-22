@@ -37,20 +37,6 @@ import (
 // owned here (catalog/config territory) — callers pair this number with their
 // own budget for display and compaction decisions.
 func (s *Store) ContextUsage(sessionID string) (used int, actual bool) {
-	return s.contextUsage(sessionID, 0)
-}
-
-// ContextUsageWithBudget is ContextUsage measured over the transcript as the
-// next request would actually send it: tool payloads the agent will not carry
-// again (see types.ElideToolPayload) are excluded. Without it a session whose
-// tool output dominates reports itself as permanently full, even after a
-// compaction that freed most of the window, and the caller sees a number that
-// does not match what it sends.
-func (s *Store) ContextUsageWithBudget(sessionID string, maxTokens int) (used int, actual bool) {
-	return s.contextUsage(sessionID, maxTokens)
-}
-
-func (s *Store) contextUsage(sessionID string, maxTokens int) (used int, actual bool) {
 	if err := s.ensure(); err != nil {
 		return 0, false
 	}
@@ -64,12 +50,6 @@ func (s *Store) contextUsage(sessionID string, maxTokens int) (used int, actual 
 	}
 	if len(msgs) == 0 {
 		return 0, false
-	}
-	// Measure what would be sent, not what is stored: an oversized tool
-	// payload is stubbed before the request goes out, so counting it here
-	// would report the session as fuller than it is.
-	if maxTokens > 0 {
-		cobottypes.ElideToolPayload(msgs, maxTokens)
 	}
 
 	// Usage facts by seq. Only rows present in the rebuilt view can serve as

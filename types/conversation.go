@@ -28,56 +28,26 @@ type Conversation struct {
 	// before it is locally truncated. 0 means disabled.
 	PerMessageSoftCap int
 
-	// MaxToolResultTokens is the cap applied to a single TOOL result message
-	// when it is appended. Tool output is re-obtainable (the agent can re-run
-	// the tool), so it is capped harder than ordinary messages: a handful of
-	// large results is what fills a context window and makes compaction
-	// unable to free anything. 0 falls back to PerMessageSoftCap (so 0 there
-	// means "disabled" as before).
-	MaxToolResultTokens int
-
-	// RoundToolBudgetTokens bounds the SUM of tool results inside one round
-	// (a user message plus everything it triggered). When appending a result
-	// pushes the round over budget, the oldest results of that round are
-	// stubbed first. 0 = MaxTokens * DefaultRoundToolBudgetPercent.
-	RoundToolBudgetTokens int
-
 	// ResponseBuffer is the number of tokens reserved for the model's response
 	// when checking the request budget.
 	ResponseBuffer int
 
 	actualInputTokens  int
 	actualOutputTokens int
-	// lastActual* keep the most recent provider report across a mid-turn
-	// ResetActualTokens (see AddActualTokens).
-	lastActualInputTokens  int
-	lastActualOutputTokens int
-	mu                     sync.Mutex
-}
-
-// resetLastActualTokens forgets the last provider report — called only when the
-// transcript's identity changes, so a new view cannot inherit the previous
-// session's usage.
-func (c *Conversation) resetLastActualTokens() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.lastActualInputTokens = 0
-	c.lastActualOutputTokens = 0
+	mu                 sync.Mutex
 }
 
 // Default context window used when MaxTokens is not specified.
 const defaultMaxTokens = 128000
 
 // NewConversation creates a new conversation with sensible defaults
-// (~128K context, 6K per-message soft cap, 4K tool-result cap, 8K response
-// buffer).
+// (~128K context, 6K per-message soft cap, 8K response buffer).
 func NewConversation() *Conversation {
 	return &Conversation{
-		Messages:            make([]Message, 0),
-		MaxTokens:           defaultMaxTokens,
-		PerMessageSoftCap:   6000,
-		MaxToolResultTokens: DefaultToolResultTokens,
-		ResponseBuffer:      8192,
+		Messages:          make([]Message, 0),
+		MaxTokens:         defaultMaxTokens,
+		PerMessageSoftCap: 6000,
+		ResponseBuffer:    8192,
 	}
 }
 
@@ -89,13 +59,6 @@ func (c *Conversation) AddActualTokens(input, output int) {
 	defer c.mu.Unlock()
 	c.actualInputTokens = input
 	c.actualOutputTokens = output
-	// The LAST reported pair survives ResetActualTokens: the live counters are
-	// the accounting basis and legitimately go stale when the transcript is
-	// rewritten mid-turn (tool output stubbed, window trimmed), but the host
-	// still needs the provider's number to stamp the turn's usage fact. Losing
-	// it is how a session ends up showing +≈ forever.
-	c.lastActualInputTokens = input
-	c.lastActualOutputTokens = output
 }
 
 // GetActualTokens returns the real token usage reported by the API.
@@ -103,15 +66,6 @@ func (c *Conversation) GetActualTokens() (input, output int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.actualInputTokens, c.actualOutputTokens
-}
-
-// LastActualTokens returns the most recent provider-reported usage even if the
-// live counters have since been reset (see AddActualTokens). It is zeroed only
-// when the transcript's identity changes (Clear / ReplaceMessages / NewTask).
-func (c *Conversation) LastActualTokens() (input, output int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.lastActualInputTokens, c.lastActualOutputTokens
 }
 
 // ResetActualTokens resets the real token counters.
@@ -132,21 +86,22 @@ func (c *Conversation) AddMessage(msg Message) {
 	msg = c.truncateMessage(msg)
 	c.Messages = append(c.Messages, msg)
 	c.updateTokenCount()
-	if msg.Role == RoleTool {
-		c.enforceRoundToolBudget()
-	}
 }
 
 // truncateMessage applies a soft cap to a single message's content. It keeps
 // the head and tail of the content and replaces the middle with an omission
 // marker so useful context at both ends is preserved.
 func (c *Conversation) truncateMessage(msg Message) Message {
-	softCap := c.PerMessageSoftCap
 	if msg.Role == RoleTool {
-		// Tool output is the unbounded part of a transcript and the only part
-		// the agent can always re-obtain, so it gets its own (tighter) cap.
-		softCap = c.toolResultCap()
+		// Never cut a tool result. A capped row keeps its head and tail and
+		// drops the middle, which is the part that answers "what did the tool
+		// actually return" — a question list with its middle removed is worse
+		// than no question list at all, because the model cannot tell that it
+		// is looking at a fragment. It is also the one row the agent can
+		// always re-obtain by calling the tool again.
+		return msg
 	}
+	softCap := c.PerMessageSoftCap
 	if softCap <= 0 {
 		return msg
 	}
@@ -195,7 +150,6 @@ func (c *Conversation) Clear() {
 	c.Messages = make([]Message, 0)
 	c.CurrentTokens = 0
 	c.ResetActualTokens()
-	c.resetLastActualTokens()
 	c.Complete = false
 }
 
@@ -258,9 +212,12 @@ func (c *Conversation) TrimToMaxTokens() { c.TrimToBudget(0) }
 // TrimToBudget drops the oldest messages until the conversation fits target
 // tokens (target <= 0 means MaxTokens — the hard window, not the watermark).
 //
-// Before dropping anything it replaces oversized tool results with a short
-// placeholder, so the agent still knows that a tool was called and can re-run
-// it. It uses GetTotalTokens so real API usage has priority.
+// Tool results are never shrunk in place: a tool result is evidence the model
+// may still be reasoning over (a question list, a file it just read), and half
+// a row is worse than none — it silently changes the meaning of what the model
+// sees. When space is needed, whole rounds go instead, and the model simply
+// re-runs whatever it still needs. It uses GetTotalTokens so real API usage has
+// priority.
 //
 // Dropping is round-aware: a round is a user message plus everything the
 // assistant and its tools produced until the next user message, and rounds are
@@ -285,25 +242,9 @@ func (c *Conversation) TrimToBudget(target int) {
 		startIdx = 1
 	}
 
-	// 1) Shrink oversized tool results in place. This is the gentlest cut: the
-	// turn structure survives, only the payload is replaced by a hint.
-	for i := startIdx; i < len(c.Messages) && c.GetTotalTokens() > target; i++ {
-		m := c.Messages[i]
-		if m.Role != RoleTool || len(m.Content) <= 200 {
-			continue
-		}
-		c.Messages[i].Content = fmt.Sprintf(
-			"[Result of %s was %d tokens; truncated by context manager. Re-run the tool if needed.]",
-			m.ToolCallID, estimateTokens(m.Content),
-		)
-		c.updateTokenCount()
-		c.ResetActualTokens()
-	}
-	if c.GetTotalTokens() <= target {
-		return
-	}
-
-	// 2) Drop whole rounds from the front, never the newest one.
+	// Drop whole rounds from the front, never the newest one. Tool results are
+	// dropped WITH their round, never edited: the model either sees the real
+	// output or knows the turn is gone (and can re-run the tool).
 	for c.GetTotalTokens() > target {
 		if len(c.Messages) <= startIdx+2 {
 			return
@@ -416,7 +357,6 @@ func (c *Conversation) ReplaceMessages(msgs []Message) {
 	c.Messages = msgs
 	c.updateTokenCount()
 	c.ResetActualTokens()
-	c.resetLastActualTokens()
 }
 
 // PatchMessageContent rewrites ONE message's content in place and adjusts

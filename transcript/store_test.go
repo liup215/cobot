@@ -713,39 +713,3 @@ func TestContextUsageIgnoresUsageFromBeforeTheCompaction(t *testing.T) {
 		t.Fatalf("after a fresh request = %d/%v, want 7200/true", used, actual)
 	}
 }
-
-// TestContextUsageWithBudgetMeasuresWhatWouldBeSent pins the readout the agent
-// footer shows. A stored transcript keeps the FULL tool output (it is the audit
-// trail and what the UI renders), but the request carries a stub once the
-// payload is over the per-window share — so the honest occupancy of the next
-// request is the elided one. Reporting the stored size instead shows a session
-// pinned near 100% right after a compaction that actually freed most of it.
-func TestContextUsageWithBudgetMeasuresWhatWouldBeSent(t *testing.T) {
-	s := openStore(t)
-	meta := NewSession("ctx-tool-payload")
-	if err := s.Create(meta); err != nil {
-		t.Fatal(err)
-	}
-
-	msgs := []cobottypes.Message{
-		{Role: cobottypes.RoleUser, Content: "read the file"},
-		{Role: cobottypes.RoleAssistant, Content: "calling"},
-		{Role: cobottypes.RoleTool, ToolCallID: "call-1", Content: strings.Repeat("x", 90000)},
-		{Role: cobottypes.RoleAssistant, Content: "done"},
-	}
-	if err := s.Append(meta.ID, msgs); err != nil {
-		t.Fatal(err)
-	}
-
-	stored, _ := s.ContextUsage(meta.ID)
-	if stored < 30000 {
-		t.Fatalf("stored estimate = %d, fixture is not tool-heavy", stored)
-	}
-	elided, _ := s.ContextUsageWithBudget(meta.ID, 20000) // 40% => 8000 budget
-	if elided >= stored {
-		t.Fatalf("budgeted usage %d is not smaller than stored %d", elided, stored)
-	}
-	if elided > 9000 {
-		t.Fatalf("budgeted usage = %d, the tool payload was not elided", elided)
-	}
-}
