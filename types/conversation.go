@@ -28,6 +28,20 @@ type Conversation struct {
 	// before it is locally truncated. 0 means disabled.
 	PerMessageSoftCap int
 
+	// MaxToolResultTokens is the cap applied to a single TOOL result message
+	// when it is appended. Tool output is re-obtainable (the agent can re-run
+	// the tool), so it is capped harder than ordinary messages: a handful of
+	// large results is what fills a context window and makes compaction
+	// unable to free anything. 0 falls back to PerMessageSoftCap (so 0 there
+	// means "disabled" as before).
+	MaxToolResultTokens int
+
+	// RoundToolBudgetTokens bounds the SUM of tool results inside one round
+	// (a user message plus everything it triggered). When appending a result
+	// pushes the round over budget, the oldest results of that round are
+	// stubbed first. 0 = MaxTokens * DefaultRoundToolBudgetPercent.
+	RoundToolBudgetTokens int
+
 	// ResponseBuffer is the number of tokens reserved for the model's response
 	// when checking the request budget.
 	ResponseBuffer int
@@ -41,13 +55,15 @@ type Conversation struct {
 const defaultMaxTokens = 128000
 
 // NewConversation creates a new conversation with sensible defaults
-// (~128K context, 6K per-message soft cap, 8K response buffer).
+// (~128K context, 6K per-message soft cap, 4K tool-result cap, 8K response
+// buffer).
 func NewConversation() *Conversation {
 	return &Conversation{
-		Messages:          make([]Message, 0),
-		MaxTokens:         defaultMaxTokens,
-		PerMessageSoftCap: 6000,
-		ResponseBuffer:    8192,
+		Messages:            make([]Message, 0),
+		MaxTokens:           defaultMaxTokens,
+		PerMessageSoftCap:   6000,
+		MaxToolResultTokens: DefaultToolResultTokens,
+		ResponseBuffer:      8192,
 	}
 }
 
@@ -86,6 +102,9 @@ func (c *Conversation) AddMessage(msg Message) {
 	msg = c.truncateMessage(msg)
 	c.Messages = append(c.Messages, msg)
 	c.updateTokenCount()
+	if msg.Role == RoleTool {
+		c.enforceRoundToolBudget()
+	}
 }
 
 // truncateMessage applies a soft cap to a single message's content. It keeps
@@ -93,6 +112,11 @@ func (c *Conversation) AddMessage(msg Message) {
 // marker so useful context at both ends is preserved.
 func (c *Conversation) truncateMessage(msg Message) Message {
 	softCap := c.PerMessageSoftCap
+	if msg.Role == RoleTool {
+		// Tool output is the unbounded part of a transcript and the only part
+		// the agent can always re-obtain, so it gets its own (tighter) cap.
+		softCap = c.toolResultCap()
+	}
 	if softCap <= 0 {
 		return msg
 	}

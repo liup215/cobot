@@ -241,6 +241,14 @@ func (s *Summarize) Compact(ctx context.Context, conv *types.Conversation) (Resu
 	msgs = append(msgs, body[cut:]...)
 
 	conv.ReplaceMessages(msgs)
+	// A kept round can be bigger than the whole keep budget (one round with
+	// several large tool results). Trimming the window by rounds alone would
+	// then leave the session above the watermark again and the next turn would
+	// start another compaction — the treadmill this strategy exists to end.
+	// Eliding the kept rows' tool payloads (never dropping rows, so the anchor
+	// below stays valid) makes the post-compaction size depend on the
+	// budget, not on the busiest round.
+	conv.ElideToolResults(s.keepRecentTokens() / 2)
 	slog.Info("compact: summarized oldest rounds",
 		"rounds", droppedRounds, "droppedMessages", len(dropped),
 		"summaryTokens", types.Estimator(summary), "tokens", conv.GetTotalTokens())

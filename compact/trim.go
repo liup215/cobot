@@ -266,8 +266,15 @@ func (t *Trim) dropOldestRounds(conv *types.Conversation) Result {
 	}
 	preLen := len(conv.Messages) // the shape the result's indices address
 	conv.ReplaceMessages(plan.msgs)
+	// The kept rounds may themselves be larger than the keep budget (a single
+	// round can hold several large tool results). Eliding their payloads —
+	// instead of dropping more rounds — keeps the working state and bounds the
+	// post-compaction size, so the next turn does not immediately compact
+	// again. Rows are not removed, so the anchor below stays valid.
+	conv.ElideToolResults(t.keepRecentTokens() / 2)
 	slog.Info("compact: trim dropped oldest rounds",
-		"rounds", plan.droppedRounds, "messages", plan.droppedMessages, "tokens", plan.projected)
+		"rounds", plan.droppedRounds, "messages", plan.droppedMessages,
+		"projected", plan.projected, "tokens", conv.GetTotalTokens())
 
 	// The persisted shape: [system?] [task (when it was dropped)] [notice]
 	// [kept tail]. Anchor = the last dropped row, i.e. the row right before
