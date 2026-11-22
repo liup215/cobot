@@ -115,13 +115,111 @@ func (c *Conversation) newestRoundStart(start int) int {
 // not the whole transcript, so a session that is large because of ordinary
 // dialogue is never shortened here (that is compaction's job).
 func (c *Conversation) ToolPayloadTokens() int {
+	return ToolPayloadTokensOf(c.Messages, c.bodyStart())
+}
+
+// ToolPayloadTokensOf estimates the tool-result payload of msgs[from:].
+func ToolPayloadTokensOf(msgs []Message, from int) int {
 	total := 0
-	for i := c.bodyStart(); i < len(c.Messages); i++ {
-		if c.Messages[i].Role == RoleTool {
-			total += estimateTokens(c.Messages[i].Content)
+	for i := from; i < len(msgs); i++ {
+		if msgs[i].Role == RoleTool {
+			total += estimateTokens(msgs[i].Content)
 		}
 	}
 	return total
+}
+
+// ElideToolPayload applies the elision policy to a plain message slice in
+// place, budgeting the tool payload at DefaultToolPayloadPercent of maxTokens.
+// It returns the tokens freed. Hosts that measure a transcript they are not
+// about to run (the context-usage readout) use this so the number they show is
+// the number the next request would actually carry.
+func ElideToolPayload(msgs []Message, maxTokens int) int {
+	if maxTokens <= 0 {
+		return 0
+	}
+	return elideToolPayload(msgs, firstBodyIndex(msgs), maxTokens,
+		maxTokens*DefaultToolPayloadPercent/100)
+}
+
+// firstBodyIndex is the first index a leading system message leaves free.
+func firstBodyIndex(msgs []Message) int {
+	for i, m := range msgs {
+		if m.Role != RoleSystem {
+			return i
+		}
+	}
+	return len(msgs)
+}
+
+// elideToolPayload is the shared implementation: it stubs tool results in
+// msgs[start:] until their payload fits toolBudget.
+func elideToolPayload(msgs []Message, start, maxTokens, toolBudget int) int {
+	if toolBudget <= 0 {
+		if maxTokens <= 0 {
+			return 0
+		}
+		toolBudget = maxTokens * DefaultToolPayloadPercent / 100
+	}
+	if len(msgs) == 0 {
+		return 0
+	}
+	total := ToolPayloadTokensOf(msgs, start)
+	if total <= toolBudget {
+		return 0
+	}
+	newest := newestRoundStartIn(msgs, start)
+
+	freed := 0
+	elide := func(i int) {
+		if msgs[i].Role != RoleTool {
+			return
+		}
+		t := estimateTokens(msgs[i].Content)
+		if t <= ToolStubMinTokens {
+			return
+		}
+		stub := ToolResultStub(msgs[i].ToolCallID, t)
+		delta := t - estimateTokens(stub)
+		if delta <= 0 {
+			return
+		}
+		msgs[i].Content = stub
+		total -= delta
+		freed += delta
+	}
+
+	for i := start; i < newest && total > toolBudget; i++ {
+		elide(i)
+	}
+	if total > toolBudget {
+		// The freshest tool result is protected only while the model has NOT
+		// answered it yet (the conversation ends on a tool result): that is the
+		// output it is about to analyse. Once the assistant has replied, the
+		// result is historical like any other and may be stubbed.
+		lastTool := -1
+		if len(msgs) > 0 && msgs[len(msgs)-1].Role == RoleTool {
+			lastTool = len(msgs) - 1
+		}
+		for i := newest; i < len(msgs) && total > toolBudget; i++ {
+			if i == lastTool {
+				continue
+			}
+			elide(i)
+		}
+	}
+	return freed
+}
+
+// newestRoundStartIn returns the index where the newest round begins (the last
+// user message at or after start), or start when there is none.
+func newestRoundStartIn(msgs []Message, start int) int {
+	for i := len(msgs) - 1; i >= start; i-- {
+		if msgs[i].Role == RoleUser {
+			return i
+		}
+	}
+	return start
 }
 
 // ElideToolResults stubs oversized tool results until the transcript's tool
@@ -138,61 +236,7 @@ func (c *Conversation) ToolPayloadTokens() int {
 // before it stays valid, and it is idempotent: a stubbed result is already
 // small.
 func (c *Conversation) ElideToolResults(toolBudget int) int {
-	if toolBudget <= 0 {
-		if c.MaxTokens <= 0 {
-			return 0
-		}
-		toolBudget = c.MaxTokens * DefaultToolPayloadPercent / 100
-	}
-	if len(c.Messages) == 0 {
-		return 0
-	}
-	total := c.ToolPayloadTokens()
-	if total <= toolBudget {
-		return 0
-	}
-	start := c.bodyStart()
-	newest := c.newestRoundStart(start)
-
-	freed := 0
-	elide := func(i int) {
-		m := &c.Messages[i]
-		if m.Role != RoleTool {
-			return
-		}
-		t := estimateTokens(m.Content)
-		if t <= ToolStubMinTokens {
-			return
-		}
-		stub := ToolResultStub(m.ToolCallID, t)
-		delta := t - estimateTokens(stub)
-		if delta <= 0 {
-			return
-		}
-		m.Content = stub
-		total -= delta
-		freed += delta
-	}
-
-	for i := start; i < newest && total > toolBudget; i++ {
-		elide(i)
-	}
-	if total > toolBudget {
-		lastTool := -1
-		for i := len(c.Messages) - 1; i >= newest; i-- {
-			if c.Messages[i].Role == RoleTool {
-				lastTool = i
-				break
-			}
-		}
-		for i := newest; i < len(c.Messages) && total > toolBudget; i++ {
-			if i == lastTool {
-				break
-			}
-			elide(i)
-		}
-	}
-
+	freed := elideToolPayload(c.Messages, c.bodyStart(), c.MaxTokens, toolBudget)
 	if freed > 0 {
 		c.updateTokenCount()
 		c.ResetActualTokens()
