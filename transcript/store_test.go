@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	cobottypes "github.com/liup215/cobot/types"
 )
@@ -643,5 +644,72 @@ func TestSaveCompactionAnchorNeverMovesBackward(t *testing.T) {
 	}
 	if c, _ := s.LoadCompaction(id); c == nil || c.Summary != "forward" || c.KeptAfterSeq != 7 {
 		t.Fatalf("forward anchor rejected: %+v", c)
+	}
+}
+
+// TestContextUsageIgnoresUsageFromBeforeTheCompaction pins the pi invalidation
+// rule for stored facts: a usage stamp written BEFORE the latest compaction
+// measured a request that still carried the rows the compaction dropped, so it
+// overstates what is left. Trusting it reported the session as pinned at ~100%
+// of the window right after a compaction that had just freed most of it — the
+// agent then believes it is out of room and compacts again (or hard-trims)
+// forever while the user reads "context full" on a session that is 20% full.
+func TestContextUsageIgnoresUsageFromBeforeTheCompaction(t *testing.T) {
+	s := openStore(t)
+	meta := NewSession("ctx-stale-fact")
+	if err := s.Create(meta); err != nil {
+		t.Fatal(err)
+	}
+
+	// The stamped rows were written an hour ago; the compaction lands after
+	// them, and the follow-up request lands after the compaction.
+	old := time.Now().Add(-time.Hour)
+	msgs := []cobottypes.Message{
+		{Role: cobottypes.RoleUser, Content: "original task", Timestamp: old},
+		{Role: cobottypes.RoleAssistant, Content: strings.Repeat("m", 4000), Timestamp: old}, // measured with the huge middle
+		{Role: cobottypes.RoleUser, Content: "question", Timestamp: old},
+		{Role: cobottypes.RoleAssistant, Content: "answer", Timestamp: old},
+	}
+	if err := s.Append(meta.ID, msgs); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StampUsage(meta.ID, 90000, 500); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh stamp: trusted (90500).
+	if used, actual := s.ContextUsage(meta.ID); !actual || used != 90500 {
+		t.Fatalf("before compaction = %d/%v, want 90500/true", used, actual)
+	}
+
+	// A compaction written AFTER that stamp drops the measured middle row.
+	if err := s.SaveCompaction(&Compaction{
+		SessionID:      meta.ID,
+		Summary:        "short summary",
+		SummaryRole:    cobottypes.RoleUser,
+		KeptAfterSeq:   2,
+		KeptPrefixSeqs: []int{0},
+		CreatedAt:      time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	used, actual := s.ContextUsage(meta.ID)
+	if actual {
+		t.Fatalf("a fact from before the compaction must not be reported as actual: %d", used)
+	}
+	if used > 1000 {
+		t.Fatalf("stale baseline leaked into the estimate: %d", used)
+	}
+
+	// A NEW request after the compaction re-establishes the baseline.
+	if err := s.Append(meta.ID, []cobottypes.Message{msg(cobottypes.RoleAssistant, "post-compaction answer")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StampUsage(meta.ID, 7000, 200); err != nil {
+		t.Fatal(err)
+	}
+	if used, actual := s.ContextUsage(meta.ID); !actual || used != 7200 {
+		t.Fatalf("after a fresh request = %d/%v, want 7200/true", used, actual)
 	}
 }

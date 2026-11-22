@@ -878,8 +878,9 @@ func (a *BaseAgent) SetWorkingDir(dir string) {
 // window) is not run at all, so the loop neither spends a summarizer call nor
 // announces a "context compacted" that changed nothing on every iteration.
 //
-// It estimates tokens for the system prompt and the JSON-serialized tool
-// descriptions because those are also sent to the provider.
+// Every number here comes from requestTokens: one basis for both comparisons
+// (see budget.go — a provider usage fact already includes the system prompt and
+// the tool table, so those must not be added a second time).
 func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string, availableTools []tools.Tool, callback StreamCallback) {
 	conv := a.conversation
 	if conv.MaxTokens <= 0 {
@@ -894,8 +895,7 @@ func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string,
 		budget = conv.MaxTokens
 	}
 
-	// Estimate current conversation tokens.
-	total := conv.GetTotalTokens()
+	total := requestTokens(conv, systemPrompt, availableTools)
 
 	// The watermarks come from the configured strategy (60%/80% for the
 	// cobot defaults): a host that injects an 80% strategy must be triggered
@@ -907,17 +907,6 @@ func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string,
 		highPct = lowPct
 	}
 
-	// Add system prompt tokens.
-	total += types.Estimator(systemPrompt)
-
-	// Add approximate tool description tokens.
-	if len(availableTools) > 0 {
-		toolJSON, err := json.Marshal(availableTools)
-		if err == nil {
-			total += types.Estimator(string(toolJSON))
-		}
-	}
-
 	if total > budget*lowPct/100 && (a.compaction == nil || a.compaction.ShouldCompact(conv)) {
 		reason := fmt.Sprintf("token budget %d/%d (%d%% threshold)", total, budget, lowPct)
 		logInfof("Token budget at %d/%d; triggering compaction", total, conv.MaxTokens)
@@ -926,13 +915,10 @@ func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string,
 		}
 		a.runCompaction(ctx, conv, callback)
 		if callback != nil {
-			callback.OnCompactionEnd(fmt.Sprintf("compaction complete: %d tokens remaining", conv.GetTotalTokens()))
+			callback.OnCompactionEnd(fmt.Sprintf("compaction complete: %d tokens remaining", requestTokens(conv, systemPrompt, availableTools)))
 		}
 	}
 
-	// The hard trim is the last safety net: it shrinks oversized tool results
-	// in place, so it runs on the raw ratio (not on the strategy's opinion).
-	// It is announced only when it actually freed tokens (see the block below).
 	// The hard trim is the last safety net: it shrinks oversized tool results
 	// in place, so it runs on the raw ratio (not on the strategy's opinion).
 	// It is announced only when it actually freed tokens — the shrink itself
@@ -945,10 +931,15 @@ func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string,
 	// the host's pre-compaction snapshot is only taken on a strategy
 	// compaction's Start — an attempt-only trim must not overwrite it with a
 	// post-compaction shape.
-	if conv.GetTotalTokens() > budget*highPct/100 {
-		before := conv.GetTotalTokens()
-		conv.TrimToMaxTokens()
-		if after := conv.GetTotalTokens(); after < before {
+	//
+	// The target is the hard WATERMARK, not MaxTokens: trimming to the window
+	// itself would leave the request at 100% of the window (the point where the
+	// provider starts silently dropping tokens) and would re-arm the trigger for
+	// the very next iteration. Room is left for the response as well
+	// (budget already excludes ResponseBuffer).
+	if before := requestTokens(conv, systemPrompt, availableTools); before > budget*highPct/100 {
+		conv.TrimToBudget(budget * highPct / 100)
+		if after := requestTokens(conv, systemPrompt, availableTools); after < before {
 			if callback != nil {
 				callback.OnCompactionStart(fmt.Sprintf("hard trim: conversation at %d/%d tokens", before, budget))
 				callback.OnCompactionEnd(fmt.Sprintf("compaction complete: %d tokens remaining", after))

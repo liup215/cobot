@@ -184,62 +184,96 @@ func (c *Conversation) GetTotalTokens() int {
 	return c.CurrentTokens
 }
 
-// TrimToMaxTokens removes oldest messages to fit within the token limit.
+// TrimToMaxTokens removes oldest messages to fit within the token limit —
+// TrimToBudget with the conversation's own MaxTokens as the target. It is kept
+// for callers that predate budget-aware trimming.
+func (c *Conversation) TrimToMaxTokens() { c.TrimToBudget(0) }
+
+// TrimToBudget drops the oldest messages until the conversation fits target
+// tokens (target <= 0 means MaxTokens — the hard window, not the watermark).
+//
 // Before dropping a large tool result message it replaces the content with a
 // short placeholder summary, so the agent still knows that a tool was called.
 // It uses GetTotalTokens so real API usage has priority.
-func (c *Conversation) TrimToMaxTokens() {
-	if c.GetTotalTokens() <= c.MaxTokens || c.MaxTokens <= 0 {
+//
+// The trim is round-aware: it never leaves a tool result stranded at the front
+// of the conversation without the assistant message that requested it. Both
+// wire formats reject an orphan tool message, and dropping message-by-message
+// from the front splits tool_call/tool_result pairs exactly half the time.
+// TrimToBudget drops the oldest messages until the conversation fits target
+// tokens (target <= 0 means MaxTokens — the hard window, not the watermark).
+//
+// Before dropping anything it replaces oversized tool results with a short
+// placeholder, so the agent still knows that a tool was called and can re-run
+// it. It uses GetTotalTokens so real API usage has priority.
+//
+// Dropping is round-aware: a round is a user message plus everything the
+// assistant and its tools produced until the next user message, and rounds are
+// removed whole. Dropping message-by-message from the front splits
+// tool_call/tool_result pairs about half the time, and both wire formats
+// reject a tool result whose requesting assistant message is gone — a trim
+// would then turn a too-long session into a hard 400 instead of a short one.
+func (c *Conversation) TrimToBudget(target int) {
+	if c.MaxTokens <= 0 {
+		return
+	}
+	if target <= 0 || target > c.MaxTokens {
+		target = c.MaxTokens
+	}
+	if c.GetTotalTokens() <= target {
 		return
 	}
 
-	// Keep system message if present, remove oldest user/assistant messages.
+	// Keep the system message if present; everything after it is droppable.
 	startIdx := 0
 	if c.HasSystemPrompt() {
 		startIdx = 1
 	}
 
-	for c.GetTotalTokens() > c.MaxTokens && len(c.Messages) > startIdx+2 {
-		removed := c.Messages[startIdx]
-
-		// Preserve a hint for large tool results instead of deleting them
-		// outright; this keeps the agent aware of work already performed.
-		if removed.Role == RoleTool && len(removed.Content) > 200 {
-			placeholder := fmt.Sprintf(
-				"[Result of %s was %d tokens; truncated by context manager. Re-run the tool if needed.]",
-				removed.ToolCallID,
-				estimateTokens(removed.Content),
-			)
-			removed.Content = placeholder
-			c.Messages[startIdx] = removed
-			c.updateTokenCount()
-			if c.GetTotalTokens() <= c.MaxTokens {
-				c.ResetActualTokens()
-				return
-			}
+	// 1) Shrink oversized tool results in place. This is the gentlest cut: the
+	// turn structure survives, only the payload is replaced by a hint.
+	for i := startIdx; i < len(c.Messages) && c.GetTotalTokens() > target; i++ {
+		m := c.Messages[i]
+		if m.Role != RoleTool || len(m.Content) <= 200 {
 			continue
 		}
+		c.Messages[i].Content = fmt.Sprintf(
+			"[Result of %s was %d tokens; truncated by context manager. Re-run the tool if needed.]",
+			m.ToolCallID, estimateTokens(m.Content),
+		)
+		c.updateTokenCount()
+		c.ResetActualTokens()
+	}
+	if c.GetTotalTokens() <= target {
+		return
+	}
 
-		removedTokens := messageTokens(removed)
-		c.Messages = append(c.Messages[:startIdx], c.Messages[startIdx+1:]...)
-		c.CurrentTokens -= removedTokens
-		if c.CurrentTokens < 0 {
-			c.CurrentTokens = 0
+	// 2) Drop whole rounds from the front, never the newest one.
+	for c.GetTotalTokens() > target {
+		if len(c.Messages) <= startIdx+2 {
+			return
 		}
+		end := startIdx + 1
+		for end < len(c.Messages) && c.Messages[end].Role != RoleUser {
+			end++
+		}
+		if end >= len(c.Messages)-1 {
+			// One giant round (a single huge tool loop, no user turn after it):
+			// rounds cannot be dropped whole, so fall back to message-by-message
+			// and clean up the orphaned tool result at the front.
+			c.Messages = append(c.Messages[:startIdx], c.Messages[startIdx+1:]...)
+			for len(c.Messages) > startIdx+1 && c.Messages[startIdx].Role == RoleTool {
+				c.Messages = append(c.Messages[:startIdx], c.Messages[startIdx+1:]...)
+			}
+			c.updateTokenCount()
+			c.ResetActualTokens()
+			continue
+		}
+		c.Messages = append(c.Messages[:startIdx], c.Messages[end:]...)
+		c.updateTokenCount()
 		c.ResetActualTokens()
 	}
 }
-
-// AutoCompact keeps total token usage under the max context window using a
-// watermark strategy:
-//
-//   - Do nothing if total tokens are below the low watermark (60%).
-//   - First truncate any single oversized old message (excluding system and
-//     the most recent user/assistant pair) that exceeds PerMessageSoftCap.
-//   - If still over the high watermark (80%), drop whole messages from the
-//     middle, starting with the largest, while preserving the first
-//     user/assistant pair and the most recent pair.
-//   - Inject a summary marker so the model knows context was truncated.
 func (c *Conversation) AutoCompact() {
 	if c.MaxTokens <= 0 {
 		return
