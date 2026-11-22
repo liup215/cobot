@@ -1,6 +1,9 @@
 package types
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Tool results are the part of a transcript that grows without bound: a file
 // read, a grep over a large tree or one MCP call can each return thousands of
@@ -41,7 +44,19 @@ const (
 	// ToolStubMinTokens is the size below which a tool result is never
 	// elided: replacing a small payload saves nothing and loses detail.
 	ToolStubMinTokens = 400
+
+	// ToolStubPrefix starts every elided tool result. Hosts use it (through
+	// IsToolResultStub) to tell "the model was shown a stub" from "this is what
+	// the tool returned", e.g. to keep the full text in the UI while sending
+	// the stub.
+	ToolStubPrefix = "[tool output omitted"
 )
+
+// IsToolResultStub reports whether content is an elision stub written by
+// ToolResultStub rather than real tool output.
+func IsToolResultStub(content string) bool {
+	return strings.HasPrefix(strings.TrimSpace(content), ToolStubPrefix)
+}
 
 // ToolResultStub renders the replacement text for an elided tool result.
 func ToolResultStub(toolCallID string, omitted int) string {
@@ -50,8 +65,8 @@ func ToolResultStub(toolCallID string, omitted int) string {
 		name = "unknown"
 	}
 	return fmt.Sprintf(
-		"[tool output omitted: %d tokens elided from tool result %q by the context manager. Re-run the tool if you need the content again.]",
-		omitted, name,
+		"%s: %d tokens elided from tool result %q by the context manager. Re-run the tool if you need the content again.]",
+		ToolStubPrefix, omitted, name,
 	)
 }
 
