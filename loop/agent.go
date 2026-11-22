@@ -427,17 +427,13 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 		}
 		systemPrompt := a.systemPromptFor(toolDescs)
 
-		// Trim conversation if it exceeds token budget before sending.
-		if a.conversation.IsTokenAboveThreshold(100) {
-			callback.OnCompactionStart(fmt.Sprintf("trim: conversation exceeds max tokens (%d)", a.conversation.MaxTokens))
-			a.conversation.TrimToMaxTokens()
-			callback.OnCompactionEnd(fmt.Sprintf("trim complete: %d tokens", a.conversation.GetTotalTokens()))
-		}
-
-		// Compaction happens in enforceTokenBudget below (60% summarize/trim
-		// watermark, 80% hard trim) so a single call owns the whole budget
-		// decision — running AutoCompact here too compacted twice per
-		// iteration, and the first pass never persisted its anchor.
+		// The whole pre-send budget decision belongs to enforceTokenBudget
+		// below (60% strategy compaction, 80% hard trim). Nothing may trim
+		// here as well: a silent TrimToMaxTokens pass drops a MIDDLE slice of
+		// the transcript, so the compaction that runs right after it anchors
+		// on a non-contiguous view — the persisted keeppoint then restores
+		// every row the silent pass removed, and the reduction is lost on the
+		// next reload.
 
 		// Determine whether the assistant still has pending work.
 		// We require tools when:
