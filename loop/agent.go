@@ -434,10 +434,10 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 			callback.OnCompactionEnd(fmt.Sprintf("trim complete: %d tokens", a.conversation.GetTotalTokens()))
 		}
 
-		// Auto-compact if tokens exceed 60% of the max context.
-		// Earlier compaction prevents the token budget from growing too
-		// large and keeps API latency stable across long conversations.
-		a.AutoCompact()
+		// Compaction happens in enforceTokenBudget below (60% summarize/trim
+		// watermark, 80% hard trim) so a single call owns the whole budget
+		// decision — running AutoCompact here too compacted twice per
+		// iteration, and the first pass never persisted its anchor.
 
 		// Determine whether the assistant still has pending work.
 		// We require tools when:
@@ -873,10 +873,15 @@ func (a *BaseAgent) SetWorkingDir(dir string) {
 	a.workingDir = dir
 }
 
-// enforceTokenBudget checks whether the upcoming request would exceed the
-// conversation budget and, if so, triggers compaction. It estimates tokens
-// for the system prompt and the JSON-serialized tool descriptions because
-// those are also sent to the provider.
+// enforceTokenBudget is the single owner of the pre-send budget decision: it
+// compacts above the strategy's low watermark (60% of the window by default)
+// and hard-trims the conversation above 80%. The strategy is consulted first —
+// a strategy that cannot free anything (every round inside the protected
+// window) is not run at all, so the loop neither spends a summarizer call nor
+// announces a "context compacted" that changed nothing on every iteration.
+//
+// It estimates tokens for the system prompt and the JSON-serialized tool
+// descriptions because those are also sent to the provider.
 func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string, availableTools []tools.Tool, callback StreamCallback) {
 	conv := a.conversation
 	if conv.MaxTokens <= 0 {
@@ -905,21 +910,29 @@ func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string,
 		}
 	}
 
-	if total <= budget*6/10 {
-		return
+	if total > budget*6/10 && (a.compaction == nil || a.compaction.ShouldCompact(conv)) {
+		reason := fmt.Sprintf("token budget %d/%d (60%% threshold)", total, budget)
+		logInfof("Token budget at %d/%d; triggering compaction", total, conv.MaxTokens)
+		if callback != nil {
+			callback.OnCompactionStart(reason)
+		}
+		a.runCompaction(ctx, conv, callback)
+		if callback != nil {
+			callback.OnCompactionEnd(fmt.Sprintf("compaction complete: %d tokens remaining", conv.GetTotalTokens()))
+		}
 	}
 
-	reason := fmt.Sprintf("token budget %d/%d (60%% threshold)", total, budget)
-	logInfof("Token budget at %d/%d; triggering compaction", total, conv.MaxTokens)
-	if callback != nil {
-		callback.OnCompactionStart(reason)
-	}
-	a.runCompaction(ctx, conv, callback)
-
+	// The hard trim is the last safety net: it shrinks oversized tool results
+	// in place, so it runs on the raw ratio (not on the strategy's opinion).
+	// It is announced only when it actually freed tokens.
 	if conv.GetTotalTokens() > budget*8/10 {
+		before := conv.GetTotalTokens()
+		if callback != nil {
+			callback.OnCompactionStart(fmt.Sprintf("hard trim: conversation at %d/%d tokens", before, budget))
+		}
 		conv.TrimToMaxTokens()
-	}
-	if callback != nil {
-		callback.OnCompactionEnd(fmt.Sprintf("compaction complete: %d tokens remaining", conv.GetTotalTokens()))
+		if callback != nil && conv.GetTotalTokens() < before {
+			callback.OnCompactionEnd(fmt.Sprintf("compaction complete: %d tokens remaining", conv.GetTotalTokens()))
+		}
 	}
 }

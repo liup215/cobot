@@ -827,14 +827,19 @@ func TestRetryDisabledWithEmptyDelays(t *testing.T) {
 
 // ─── compaction + tool update callbacks ──────────────────────────────────────
 
-// When the token budget is exceeded the loop emits OnCompactionStart/End.
+// When the token budget is exceeded and the strategy can actually free room
+// the loop emits OnCompactionStart/End.
 func TestCompactionEventsFire(t *testing.T) {
-	// Tiny budget: a single big user message crosses the 60% line.
+	// Tiny budget: the seeded rounds cross both watermarks.
 	agent, _ := newTestAgent(t,
 		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c1", "done")}},
 	)
 	agent.conversation.MaxTokens = 200
 	agent.conversation.ResponseBuffer = 0
+	for i := 0; i < 8; i++ {
+		agent.conversation.AddMessage(types.Message{Role: types.RoleUser, Content: strings.Repeat("x", 200)})
+		agent.conversation.AddMessage(types.Message{Role: types.RoleAssistant, Content: "ok"})
+	}
 	cb := &recordingCallback{}
 	if _, err := agent.RunWithCallback(context.Background(), "a very long task prompt that exceeds the tiny token budget for sure", cb); err != nil {
 		t.Fatalf("run: %v", err)
@@ -845,6 +850,35 @@ func TestCompactionEventsFire(t *testing.T) {
 	}
 	if len(snap.compactionEnds) == 0 {
 		t.Error("OnCompactionEnd never fired")
+	}
+}
+
+// A conversation that is above the low watermark but has nothing to compact
+// (every round sits inside the protected window and the hard trim has no
+// oversized tool results to shrink) must not be "compacted" on every
+// iteration: the strategy is not run at all, so no events fire and the token
+// count is unchanged. This is the no-progress storm regression.
+func TestUncompactableConversationDoesNotAnnounceCompaction(t *testing.T) {
+	agent, _ := newTestAgent(t,
+		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c1", "done")}},
+	)
+	agent.conversation.MaxTokens = 1000
+	agent.conversation.ResponseBuffer = 0
+	// One round only (fewer than KeepRounds), just above 60%: no round may be
+	// dropped and there is no oversized tool result to shrink.
+	agent.conversation.AddMessage(types.Message{Role: types.RoleUser, Content: strings.Repeat("y", 1800)})
+	agent.conversation.AddMessage(types.Message{Role: types.RoleAssistant, Content: "ok"})
+	before := agent.conversation.GetTotalTokens()
+
+	cb := &recordingCallback{}
+	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(cb.snapshot().compactionStarts) != 0 {
+		t.Errorf("compaction announced for an uncompactable conversation: %v", cb.snapshot().compactionStarts)
+	}
+	if agent.conversation.GetTotalTokens() < before {
+		t.Logf("note: conversation shrank %d -> %d", before, agent.conversation.GetTotalTokens())
 	}
 }
 

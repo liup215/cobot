@@ -911,3 +911,117 @@ func TestDefaultComboIsSummarizeThenTrim(t *testing.T) {
 		t.Errorf("default fallback = %T, want *Trim", combo.Fallback)
 	}
 }
+
+// ─── anchorable Trim (persistence) ───────────────────────────────────────────
+
+// TestTrimResultIsAnchorable pins the persisted shape: Trim leaves exactly the
+// three parts a compaction row can describe — protected prefix, one notice
+// row, verbatim tail — and reports where the tail starts plus which rows were
+// kept ahead of it. Without that a reload restored every dropped round.
+func TestTrimResultIsAnchorable(t *testing.T) {
+	exactEstimator(t)
+
+	msgs := append(protectedMessages(), fillerRounds(10, 80)...)
+	conv := buildConv(2500, msgs...)
+	pre := conv.GetMessages()
+	preLen := len(pre)
+
+	strategy := &Trim{KeepRounds: 2}
+	res, err := strategy.Compact(context.Background(), conv)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if !res.Anchorable {
+		t.Fatalf("Trim result is not anchorable: %+v", res)
+	}
+	if res.SummaryRole != types.RoleUser || !strings.HasPrefix(res.Summary, "[Context compacted:") {
+		t.Errorf("summary = %q (role %q), want the user-role notice", res.Summary, res.SummaryRole)
+	}
+	if res.KeptFromIndex <= 0 || res.KeptFromIndex >= preLen {
+		t.Fatalf("KeptFromIndex = %d, want a tail start inside (0,%d)", res.KeptFromIndex, preLen)
+	}
+	// Prefix indices are the leading system message (and the task message when
+	// it fell inside the dropped range).
+	if len(res.KeptPrefixIndices) == 0 || res.KeptPrefixIndices[0] != 0 {
+		t.Errorf("KeptPrefixIndices = %v, want the system row first", res.KeptPrefixIndices)
+	}
+	for _, idx := range res.KeptPrefixIndices {
+		if idx < 0 || idx >= preLen {
+			t.Fatalf("prefix index %d outside the pre-compaction conversation", idx)
+		}
+	}
+	// The rebuilt view must equal what Compact left in memory: prefix + notice
+	// + tail(pre[KeptFromIndex:]).
+	rebuilt := make([]types.Message, 0, preLen)
+	for _, idx := range res.KeptPrefixIndices {
+		rebuilt = append(rebuilt, pre[idx])
+	}
+	rebuilt = append(rebuilt, types.Message{Role: res.SummaryRole, Content: res.Summary})
+	rebuilt = append(rebuilt, pre[res.KeptFromIndex:]...)
+	after := conv.GetMessages()
+	if len(rebuilt) != len(after) {
+		t.Fatalf("rebuild = %d messages, live = %d", len(rebuilt), len(after))
+	}
+	for i := range rebuilt {
+		if rebuilt[i].Role != after[i].Role || rebuilt[i].Content != after[i].Content {
+			t.Fatalf("message %d differs: rebuilt %q, live %q", i, rebuilt[i].Content, after[i].Content)
+		}
+	}
+}
+
+// TestTrimShouldCompactNeedsSomethingToDrop pins the anti-storm rule: in the
+// 60–80% band a conversation whose rounds are all inside the protected window
+// is not compactable, because dropping rounds cannot free anything there.
+func TestTrimShouldCompactNeedsSomethingToDrop(t *testing.T) {
+	exactEstimator(t)
+
+	// Two rounds inside the protected window (KeepRounds 6), ~65% of the
+	// window: above the low watermark, below the high one.
+	msgs := append(protectedMessages(), fillerRounds(2, 400)...)
+	conv := buildConv(2500, msgs...)
+	if !conv.IsTokenAboveThreshold(60) || conv.GetTotalTokens() > conv.MaxTokens*80/100 {
+		t.Fatalf("test setup: want 60%%..80%%, have %d/%d", conv.GetTotalTokens(), conv.MaxTokens)
+	}
+	if (&Trim{}).ShouldCompact(conv) {
+		t.Error("ShouldCompact = true although no round can be dropped")
+	}
+
+	// Above the hard line the hard trim still has work, so it is compactable.
+	conv.MaxTokens = 900
+	if !(&Trim{}).ShouldCompact(conv) {
+		t.Error("ShouldCompact = false above the high watermark, want true (hard trim)")
+	}
+}
+
+// TestComboKeepsPrimaryAnchorWhenFallbackOnlyShrinks pins the persistence
+// hole: a fallback that merely shrinks content in place (Trim's hard trim)
+// keeps the primary's message shape, so the primary's anchor must survive.
+func TestComboKeepsPrimaryAnchorWhenFallbackOnlyShrinks(t *testing.T) {
+	exactEstimator(t)
+
+	// A summary small enough to free the budget, but a fallback forced to run
+	// (it reports compactable) that changes nothing about the rows.
+	conv := newSummarizeConv()
+	fake := &fakeSummarizer{summary: "Task goal: fix the login bug"}
+	strategy := NewCombo(&Summarize{Summarizer: fake, KeepRounds: 2}, &noRowChangeTrim{})
+	res, err := strategy.Compact(context.Background(), conv)
+	if err != nil {
+		t.Fatalf("Combo: %v", err)
+	}
+	if !res.Anchorable {
+		t.Fatalf("result is not anchorable: %+v", res)
+	}
+	if !strings.Contains(res.Summary, fake.summary) {
+		t.Errorf("summary = %q, want the primary summary", res.Summary)
+	}
+}
+
+// noRowChangeTrim is a fallback that reports "compactable" and drops no rows,
+// standing in for Trim's in-place hard trim.
+type noRowChangeTrim struct{}
+
+func (noRowChangeTrim) ShouldCompact(*types.Conversation) bool { return true }
+
+func (noRowChangeTrim) Compact(_ context.Context, conv *types.Conversation) (Result, error) {
+	return Result{}, nil
+}

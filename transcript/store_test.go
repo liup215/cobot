@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	cobottypes "github.com/liup215/cobot/types"
@@ -492,5 +493,105 @@ func TestNewSessionIDsUniqueWithinOneTick(t *testing.T) {
 			t.Fatalf("duplicate session id at call %d: %s", i, id)
 		}
 		seen[id] = true
+	}
+}
+
+// TestContextUsageIgnoresCompactedMiddle pins the compaction-aware occupancy:
+// a compaction drops the summarized middle from the transcript the model ever
+// sees again, so those rows must not count — counting them reported the
+// session as permanently full (60–80% band forever → a compaction attempt on
+// every loop iteration while the pill never moved).
+func TestContextUsageIgnoresCompactedMiddle(t *testing.T) {
+	s := openStore(t)
+	meta := NewSession("ctx-compacted")
+	if err := s.Create(meta); err != nil {
+		t.Fatal(err)
+	}
+
+	// 16 rows, one of them a huge tool result sitting in the middle.
+	msgs := make([]cobottypes.Message, 0, 16)
+	msgs = append(msgs, msg(cobottypes.RoleUser, "original task"))
+	for i := 0; i < 7; i++ {
+		msgs = append(msgs, msg(cobottypes.RoleAssistant, fmt.Sprintf("answer %d", i)))
+		msgs = append(msgs, msg(cobottypes.RoleUser, fmt.Sprintf("question %d", i)))
+	}
+	msgs = append(msgs, msg(cobottypes.RoleTool, strings.Repeat("z", 8000)), msg(cobottypes.RoleAssistant, "done"))
+	if err := s.Append(meta.ID, msgs); err != nil {
+		t.Fatal(err)
+	}
+
+	// No compaction: the huge middle row is part of the view.
+	full, actual := s.ContextUsage(meta.ID)
+	if actual {
+		t.Fatal("no usage fact yet: actual must be false (estimate path)")
+	}
+	if full < 2000 {
+		t.Fatalf("estimate = %d, want the 8000-char tool row counted", full)
+	}
+
+	// Compact everything except the original task (seq 1) and the last row.
+	if err := s.SaveCompaction(&Compaction{
+		SessionID:      meta.ID,
+		Summary:        "short summary of the early conversation",
+		SummaryRole:    cobottypes.RoleUser,
+		KeptAfterSeq:   len(msgs) - 1,
+		KeptPrefixSeqs: []int{1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	compacted, _ := s.ContextUsage(meta.ID)
+	if compacted >= full {
+		t.Fatalf("compacted occupancy = %d, want it below the uncompacted %d", compacted, full)
+	}
+	if compacted > 200 {
+		t.Fatalf("compacted occupancy = %d, want ~the summary plus the last row (the dropped middle must not count)", compacted)
+	}
+}
+
+// TestContextUsageBaselineSkipsDroppedRows pins the second half of the same
+// rule: a usage fact stamped on a row the compaction dropped measured a
+// request that no longer exists, so it must not serve as the baseline.
+func TestContextUsageBaselineSkipsDroppedRows(t *testing.T) {
+	s := openStore(t)
+	meta := NewSession("ctx-baseline")
+	if err := s.Create(meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(meta.ID, []cobottypes.Message{
+		msg(cobottypes.RoleUser, "task"),
+		msg(cobottypes.RoleAssistant, "measured answer"),
+		msg(cobottypes.RoleUser, "later question"),
+		msg(cobottypes.RoleAssistant, "later answer"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The fact lands on the newest assistant row (seq 4).
+	if err := s.StampUsage(meta.ID, 4000, 100); err != nil {
+		t.Fatal(err)
+	}
+	used, actual := s.ContextUsage(meta.ID)
+	if !actual || used < 4100 {
+		t.Fatalf("used=%d actual=%v, want the 4100-token baseline", used, actual)
+	}
+
+	// Drop everything up to seq 3: the fact row is gone, so the occupancy
+	// falls back to an estimate of the surviving view instead of reporting a
+	// measurement of deleted history.
+	if err := s.SaveCompaction(&Compaction{
+		SessionID:      meta.ID,
+		Summary:        "summary",
+		SummaryRole:    cobottypes.RoleUser,
+		KeptAfterSeq:   3,
+		KeptPrefixSeqs: []int{1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	used, actual = s.ContextUsage(meta.ID)
+	if actual {
+		t.Errorf("actual = true, want false (no surviving usage fact)")
+	}
+	if used >= 4100 {
+		t.Errorf("used = %d, want an estimate of the surviving rows only", used)
 	}
 }

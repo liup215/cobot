@@ -23,6 +23,10 @@ import (
 //     (e.g. the retained rounds alone exceed the low watermark).
 //   - If both fail, the combo returns a joined error; the loop logs it and
 //     keeps going — the pre-send hard trim remains the safety net.
+//   - A fallback that only SHRANK content in place (Trim's hard trim) leaves
+//     the primary's message shape intact, so the primary's anchorable result
+//     is what the host must persist: discarding it there was a persistence
+//     hole (a summarized session reloaded as the full transcript).
 type Combo struct {
 	// Primary runs first (typically *Summarize).
 	Primary Strategy
@@ -76,14 +80,20 @@ func (c *Combo) Compact(ctx context.Context, conv *types.Conversation) (Result, 
 		return primaryResult, nil
 	}
 	// The fallback rewrote the conversation on top of (or instead of) the
-	// primary — its result describes the final state and is never anchorable
-	// (Trim keeps interleaved survivors).
+	// primary. When it kept the same rows (Trim's hard trim rewrites message
+	// content in place) the primary's anchor still describes the final shape,
+	// so its result is the one to persist; when the fallback dropped or
+	// inserted rows its own result describes the final state.
+	rowsBefore := conv.MessageCount()
 	res, err := c.Fallback.Compact(ctx, conv)
 	if err != nil {
 		if primaryErr != nil {
 			return Result{}, fmt.Errorf("compact: primary failed (%v) and fallback failed: %w", primaryErr, err)
 		}
 		return Result{}, err
+	}
+	if primaryErr == nil && primaryResult.Anchorable && conv.MessageCount() == rowsBefore {
+		return primaryResult, nil
 	}
 	return res, nil
 }
