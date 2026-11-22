@@ -404,7 +404,16 @@ func TestRunResultNoCrossRunLeakAfterCompaction(t *testing.T) {
 		provider.TurnScript{Content: "second run analysis", ToolCalls: []provider.ToolCall{echoCall("c3")}},
 		provider.TurnScript{Err: errors.New("boom")},
 	)
-	agent := newProbeAgent(t, prov, 1000)
+	agent := newProbeAgent(t, prov, 2000)
+	// Deterministic compaction: the default combo would summarize through
+	// the scripted provider and consume one of its turns.
+	agent.compaction = compact.NewTrim()
+	// Older history the trim may legitimately drop: the keep window must stay
+	// wide enough that the first run's deliverable survives below it.
+	for i := 0; i < 8; i++ {
+		agent.conversation.AddMessage(types.Message{Role: types.RoleUser, Content: strings.Repeat("h", 200)})
+		agent.conversation.AddMessage(types.Message{Role: types.RoleAssistant, Content: "noted"})
+	}
 
 	if _, err := agent.Run(context.Background(), "task one"); err != nil {
 		t.Fatalf("first run: %v", err)
@@ -434,8 +443,8 @@ func TestRunResultNoCrossRunLeakAfterCompaction(t *testing.T) {
 	if !stillThere {
 		t.Fatal("test setup: the first run's deliverable was compacted away; nothing to leak")
 	}
-	if agent.conversation.MessageCount() < startMsgCount {
-		t.Fatalf("test setup: transcript shrank below the run-start count (%d < %d); the leak precondition is gone", agent.conversation.MessageCount(), startMsgCount)
+	if agent.conversation.MessageCount() == startMsgCount {
+		t.Fatalf("test setup: transcript was not rewritten (%d messages); no index shift to guard", startMsgCount)
 	}
 
 	if res.FinalText != "second run analysis" {

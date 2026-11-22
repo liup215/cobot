@@ -465,10 +465,13 @@ func TestSummarizePromptOverride(t *testing.T) {
 func TestSummarizeNoCompactableRoundsNeverCallsLLM(t *testing.T) {
 	exactEstimator(t)
 
-	conv := buildConv(400, append(protectedMessages(),
-		types.Message{Role: types.RoleUser, Content: strings.Repeat("q", 200)},
-		types.Message{Role: types.RoleAssistant, Content: strings.Repeat("a", 200)},
-	)...)
+	// One round only: dropping rounds cannot free anything, and the
+	// budget-aware keep window has nothing to shrink.
+	conv := buildConv(400,
+		types.Message{Role: types.RoleSystem, Content: sysContent},
+		types.Message{Role: types.RoleUser, Content: strings.Repeat("q", 300)},
+		types.Message{Role: types.RoleAssistant, Content: strings.Repeat("a", 300)},
+	)
 	fake := &fakeSummarizer{summary: "should not be used"}
 	strategy := &Summarize{Summarizer: fake}
 
@@ -481,7 +484,7 @@ func TestSummarizeNoCompactableRoundsNeverCallsLLM(t *testing.T) {
 	if fake.calls != 0 {
 		t.Errorf("summarizer called %d times, want 0", fake.calls)
 	}
-	if len(conv.Messages) != 4 {
+	if len(conv.Messages) != 3 {
 		t.Errorf("conversation was modified: %d messages", len(conv.Messages))
 	}
 }
@@ -975,9 +978,12 @@ func TestTrimResultIsAnchorable(t *testing.T) {
 func TestTrimShouldCompactNeedsSomethingToDrop(t *testing.T) {
 	exactEstimator(t)
 
-	// Two rounds inside the protected window (KeepRounds 6), ~65% of the
-	// window: above the low watermark, below the high one.
-	msgs := append(protectedMessages(), fillerRounds(2, 400)...)
+	// A single round, ~65% of the window: above the low watermark, below the
+	// high one. There is no other round to drop and no tool result to shrink.
+	msgs := append(protectedMessages()[:1],
+		types.Message{Role: types.RoleUser, Content: strings.Repeat("q", 1600)},
+		types.Message{Role: types.RoleAssistant, Content: strings.Repeat("a", 100)},
+	)
 	conv := buildConv(2500, msgs...)
 	if !conv.IsTokenAboveThreshold(60) || conv.GetTotalTokens() > conv.MaxTokens*80/100 {
 		t.Fatalf("test setup: want 60%%..80%%, have %d/%d", conv.GetTotalTokens(), conv.MaxTokens)
@@ -1024,4 +1030,65 @@ func (noRowChangeTrim) ShouldCompact(*types.Conversation) bool { return true }
 
 func (noRowChangeTrim) Compact(_ context.Context, conv *types.Conversation) (Result, error) {
 	return Result{}, nil
+}
+
+// TestTrimKeepWindowShrinksToFit pins the budget-aware keep window: when the
+// newest rounds alone exceed the low watermark, keeping them verbatim would
+// make the compaction a no-op — the conversation would sit permanently above
+// the watermark and every iteration would trim, hard-trim and trim again. The
+// window shrinks instead, so one compaction is enough to get back under the
+// low watermark.
+func TestTrimKeepWindowShrinksToFit(t *testing.T) {
+	exactEstimator(t)
+
+	if got := fitKeepRounds(nil, nil, 6, 100); got != 6 {
+		t.Errorf("fitKeepRounds on an empty transcript = %d, want the configured 6", got)
+	}
+	// A single round can never be dropped: the keep window collapses to 0.
+	single := SplitRounds(fillerRounds(1, 10))
+	if got := fitKeepRounds(fillerRounds(1, 10), single, 6, 10); got != 0 {
+		t.Errorf("fitKeepRounds with one round = %d, want 0", got)
+	}
+	// Rounds too big to fit: the window shrinks to the newest one.
+	body := fillerRounds(10, 100) // ~200 tokens per round
+	rounds := SplitRounds(body)
+	if got := fitKeepRounds(body, rounds, 6, 300); got != 1 {
+		t.Errorf("fitKeepRounds with oversized rounds = %d, want 1", got)
+	}
+	// Rounds that fit keep the configured window, capped so something is left
+	// to drop.
+	if got := fitKeepRounds(body, rounds, 6, 100000); got != 6 {
+		t.Errorf("fitKeepRounds when everything fits = %d, want 6", got)
+	}
+
+	// End to end: 3 huge rounds in a small window. KeepRounds 6 would protect
+	// all of them (no compaction at all); the budget-aware window shrinks so the
+	// older rounds can go instead of the transcript being pinned above the
+	// watermark forever.
+	msgs := append(protectedMessages(), fillerRounds(3, 400)...)
+	conv := buildConv(1000, msgs...)
+	if conv.GetTotalTokens() <= conv.MaxTokens*60/100 {
+		t.Fatalf("test setup: want above the low watermark, have %d/%d", conv.GetTotalTokens(), conv.MaxTokens)
+	}
+	before := conv.GetTotalTokens()
+	res, err := (&Trim{}).Compact(context.Background(), conv)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if !res.Anchorable {
+		t.Error("Trim result is not anchorable; the reduction could not be persisted")
+	}
+	if conv.GetTotalTokens() >= before {
+		t.Errorf("compaction freed nothing: %d -> %d", before, conv.GetTotalTokens())
+	}
+	joined := ""
+	for _, m := range conv.GetMessages() {
+		joined += m.Content
+	}
+	if strings.Contains(joined, "round-1 ") || strings.Contains(joined, "round-2 ") {
+		t.Errorf("old rounds survived the budget-aware compaction: %.200s", joined)
+	}
+	if !strings.Contains(joined, "round-3 ") {
+		t.Error("the newest round must never be dropped")
+	}
 }

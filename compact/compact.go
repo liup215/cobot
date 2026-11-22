@@ -156,6 +156,42 @@ func SplitRounds(msgs []types.Message) []Round {
 	return rounds
 }
 
+// fitKeepRounds returns how many of the most-recent rounds may be kept
+// verbatim so that the kept window still fits inside limit tokens.
+//
+// keep is the strategy's configured window; it is lowered (never below 1)
+// while the newest rounds alone exceed limit, and it is capped at len(rounds)-1
+// so a conversation that is over budget always has at least one round to drop.
+// Without this a session whose last few rounds are enormous (a long tool
+// transcript, a pasted paper) sits permanently above the watermark: the
+// strategy cannot free anything, the loop hard-trims down to the limit and
+// compacts again on the very next iteration — the "context never gets better
+// across turns" treadmill.
+func fitKeepRounds(body []types.Message, rounds []Round, keep, limit int) int {
+	if len(rounds) == 0 {
+		return keep
+	}
+	if keep >= len(rounds) {
+		keep = len(rounds) - 1
+	} else if len(rounds) > 1 && keep < 1 {
+		keep = 1
+	}
+	if keep < 1 {
+		return 0 // a single round: nothing can be dropped
+	}
+	for keep > 1 {
+		kept := 0
+		for _, m := range body[rounds[len(rounds)-keep].Start:] {
+			kept += types.MessageTokens(m)
+		}
+		if limit <= 0 || kept <= limit {
+			break
+		}
+		keep--
+	}
+	return keep
+}
+
 // systemPrefix returns the number of leading system messages (0 or 1) that
 // must survive every compaction untouched.
 func systemPrefix(conv *types.Conversation) int {

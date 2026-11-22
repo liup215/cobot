@@ -853,32 +853,28 @@ func TestCompactionEventsFire(t *testing.T) {
 	}
 }
 
-// A conversation that is above the low watermark but has nothing to compact
-// (every round sits inside the protected window and the hard trim has no
-// oversized tool results to shrink) must not be "compacted" on every
-// iteration: the strategy is not run at all, so no events fire and the token
-// count is unchanged. This is the no-progress storm regression.
-func TestUncompactableConversationDoesNotAnnounceCompaction(t *testing.T) {
+// The strategy is only consulted when the CONVERSATION is worth compacting,
+// not merely when the assembled request is big: the system prompt and the
+// tool schemas are fixed costs that compaction cannot touch, so a transcript
+// well below its own watermark must not trigger a "compaction" that would
+// only announce itself. This is the no-progress storm regression.
+func TestCompactionIgnoresFixedOverhead(t *testing.T) {
 	agent, _ := newTestAgent(t,
 		provider.TurnScript{ToolCalls: []provider.ToolCall{completionCall("c1", "done")}},
 	)
 	agent.conversation.MaxTokens = 1000
 	agent.conversation.ResponseBuffer = 0
-	// One round only (fewer than KeepRounds), just above 60%: no round may be
-	// dropped and there is no oversized tool result to shrink.
-	agent.conversation.AddMessage(types.Message{Role: types.RoleUser, Content: strings.Repeat("y", 1800)})
+	// One round, ~20% of the window: the strategy has nothing to free, while
+	// system prompt + tool schemas alone push the request over 60%.
+	agent.conversation.AddMessage(types.Message{Role: types.RoleUser, Content: strings.Repeat("y", 180)})
 	agent.conversation.AddMessage(types.Message{Role: types.RoleAssistant, Content: "ok"})
-	before := agent.conversation.GetTotalTokens()
 
 	cb := &recordingCallback{}
 	if _, err := agent.RunWithCallback(context.Background(), "task", cb); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if len(cb.snapshot().compactionStarts) != 0 {
-		t.Errorf("compaction announced for an uncompactable conversation: %v", cb.snapshot().compactionStarts)
-	}
-	if agent.conversation.GetTotalTokens() < before {
-		t.Logf("note: conversation shrank %d -> %d", before, agent.conversation.GetTotalTokens())
+		t.Errorf("compaction announced for a transcript below its watermark: %v", cb.snapshot().compactionStarts)
 	}
 }
 

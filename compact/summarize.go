@@ -157,7 +157,10 @@ func (s *Summarize) ShouldCompact(conv *types.Conversation) bool {
 	if !conv.IsTokenAboveThreshold(s.lowWatermark()) {
 		return false
 	}
-	return compactableCut(conv.Messages[systemPrefix(conv):], s.keepRounds()) > 0
+	body := conv.Messages[systemPrefix(conv):]
+	rounds := SplitRounds(body)
+	keep := fitKeepRounds(body, rounds, s.keepRounds(), watermark(conv, s.lowWatermark()))
+	return len(rounds) > keep && keep > 0
 }
 
 // Compact summarizes the rounds outside the protected window and replaces
@@ -173,8 +176,8 @@ func (s *Summarize) Compact(ctx context.Context, conv *types.Conversation) (Resu
 	sys := systemPrefix(conv)
 	body := conv.Messages[sys:]
 	rounds := SplitRounds(body)
-	keep := s.keepRounds()
-	if len(rounds) <= keep {
+	keep := fitKeepRounds(body, rounds, s.keepRounds(), watermark(conv, s.lowWatermark()))
+	if len(rounds) <= keep || keep == 0 {
 		return Result{}, nil // nothing outside the protected window
 	}
 	droppedRounds := len(rounds) - keep

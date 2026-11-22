@@ -109,14 +109,19 @@ func (t *Trim) ShouldCompact(conv *types.Conversation) bool {
 	return t.hasCompactableRound(conv)
 }
 
-// hasCompactableRound reports whether at least one round sits outside the
-// protected KeepRounds window.
+// hasCompactableRound reports whether dropping rounds would actually free
+// tokens — not merely whether rounds exist outside the keep window. The
+// projection is the same one Compact applies (including the notice it leaves
+// behind), so the trigger and the action can never disagree: a conversation
+// whose only droppable round is the tiny task turn is not "compactable", and
+// the loop does not announce a compaction that changes nothing.
+//
+// The keep window is budget-aware (see fitKeepRounds): when the newest rounds
+// alone exceed the low watermark the window shrinks instead of pinning the
+// conversation above it forever.
 func (t *Trim) hasCompactableRound(conv *types.Conversation) bool {
-	if conv == nil {
-		return false
-	}
-	body := conv.Messages[systemPrefix(conv):]
-	return len(SplitRounds(body)) > t.keepRounds()
+	_, ok := t.planDrop(conv)
+	return ok
 }
 
 // Compact drops the oldest rounds until the conversation is back below the
@@ -139,17 +144,28 @@ func (t *Trim) Compact(ctx context.Context, conv *types.Conversation) (Result, e
 	return res, nil
 }
 
-// dropOldestRounds drops as many leading unprotected rounds as needed to get
-// the conversation back below the low watermark, in one pass, and reports the
-// resulting shape. A pass that frees nothing leaves the conversation alone.
-func (t *Trim) dropOldestRounds(conv *types.Conversation) Result {
+// trimPlan is a computed round drop: the message list to install plus the
+// counts used for the notice and the persisted shape.
+type trimPlan struct {
+	body            []types.Message
+	cut             int
+	droppedRounds   int
+	droppedMessages int
+	msgs            []types.Message
+	projected       int
+}
+
+// planDrop computes the round drop Compact would apply, without touching the
+// conversation. ok=false means there is nothing to gain (no unprotected round,
+// or the drop would not shrink the transcript).
+func (t *Trim) planDrop(conv *types.Conversation) (trimPlan, bool) {
 	sys := systemPrefix(conv)
 	body := conv.Messages[sys:]
 	rounds := SplitRounds(body)
 
-	keep := t.keepRounds()
-	if len(rounds) <= keep {
-		return Result{} // only the hard trim can help
+	keep := fitKeepRounds(body, rounds, t.keepRounds(), watermark(conv, t.lowWatermark()))
+	if keep == 0 || len(rounds) <= keep {
+		return trimPlan{}, false // only the hard trim can help
 	}
 	compactable := rounds[:len(rounds)-keep]
 
@@ -210,27 +226,44 @@ func (t *Trim) dropOldestRounds(conv *types.Conversation) Result {
 	// Nothing gained (e.g. only the protected task message sat in the dropped
 	// rounds): leave the conversation alone.
 	if droppedRounds == 0 || projected >= current {
+		return trimPlan{}, false
+	}
+	return trimPlan{
+		body:            body,
+		cut:             cut,
+		droppedRounds:   droppedRounds,
+		droppedMessages: droppedMessages,
+		msgs:            msgs,
+		projected:       projected,
+	}, true
+}
+
+// dropOldestRounds applies the plan and reports the resulting shape.
+func (t *Trim) dropOldestRounds(conv *types.Conversation) Result {
+	plan, ok := t.planDrop(conv)
+	if !ok {
 		return Result{}
 	}
-
-	conv.ReplaceMessages(msgs)
+	conv.ReplaceMessages(plan.msgs)
 	slog.Info("compact: trim dropped oldest rounds",
-		"rounds", droppedRounds, "messages", droppedMessages, "tokens", projected)
+		"rounds", plan.droppedRounds, "messages", plan.droppedMessages, "tokens", plan.projected)
 
 	// The persisted shape: [system?] [task (when it was dropped)] [notice]
 	// [kept tail]. Anchor = the last dropped row, i.e. the row right before
 	// the tail starts.
+	sys := systemPrefix(conv)
+	firstUser := firstUserMessage(plan.body)
 	prefix := make([]int, 0, sys+1)
 	for i := 0; i < sys; i++ {
 		prefix = append(prefix, i)
 	}
-	if firstUser >= 0 && firstUser < cut {
+	if firstUser >= 0 && firstUser < plan.cut {
 		prefix = append(prefix, sys+firstUser)
 	}
-	keptFrom := sys + cut
+	keptFrom := sys + plan.cut
 	anchorable := keptFrom > 0 && !containsIndex(prefix, keptFrom-1)
 	return Result{
-		Summary:           fmt.Sprintf(trimNoticeFormat, droppedRounds, droppedMessages),
+		Summary:           fmt.Sprintf(trimNoticeFormat, plan.droppedRounds, plan.droppedMessages),
 		SummaryRole:       types.RoleUser,
 		KeptFromIndex:     keptFrom,
 		KeptPrefixIndices: prefix,
