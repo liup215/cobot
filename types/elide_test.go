@@ -176,3 +176,37 @@ func TestElideToolResultsLeavesSmallToolOutputAlone(t *testing.T) {
 		t.Fatalf("a small tool result was rewritten: %q", conv.Messages[2].Content)
 	}
 }
+
+// TestLastActualTokensSurvivesAMidTurnReset pins the fact channel the host
+// stamps usage from. Elision/trimming legitimately invalidate the LIVE counters
+// (they measured a request whose transcript no longer exists), but if that also
+// erased the provider's report the host would have nothing to persist and the
+// session would be stuck on estimation — the exact symptom this whole change is
+// about. Only a transcript-identity change may forget the report.
+func TestLastActualTokensSurvivesAMidTurnReset(t *testing.T) {
+	conv := NewConversation()
+	conv.PerMessageSoftCap = 0
+	conv.MaxToolResultTokens = 0
+
+	conv.AddMessage(Message{Role: RoleUser, Content: "read it"})
+	conv.AddMessage(Message{Role: RoleAssistant, Content: "calling"})
+	conv.AddMessage(Message{Role: RoleTool, ToolCallID: "c1", Content: big("c1", 30000)})
+	conv.AddMessage(Message{Role: RoleAssistant, Content: "read it, it says hi"})
+	conv.AddActualTokens(51000, 1200)
+
+	if freed := conv.ElideToolResults(1); freed == 0 {
+		t.Fatalf("fixture did not elide, so the reset is not exercised")
+	}
+	if in, out := conv.GetActualTokens(); in != 0 || out != 0 {
+		t.Fatalf("live counters = %d/%d, want 0/0 after elision", in, out)
+	}
+	if in, out := conv.LastActualTokens(); in != 51000 || out != 1200 {
+		t.Fatalf("last report = %d/%d, want 51000/1200", in, out)
+	}
+
+	// A different transcript must not inherit the previous session's report.
+	conv.ReplaceMessages([]Message{{Role: RoleUser, Content: "another session"}})
+	if in, out := conv.LastActualTokens(); in != 0 || out != 0 {
+		t.Fatalf("last report leaked across ReplaceMessages: %d/%d", in, out)
+	}
+}

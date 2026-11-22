@@ -48,7 +48,21 @@ type Conversation struct {
 
 	actualInputTokens  int
 	actualOutputTokens int
-	mu                 sync.Mutex
+	// lastActual* keep the most recent provider report across a mid-turn
+	// ResetActualTokens (see AddActualTokens).
+	lastActualInputTokens  int
+	lastActualOutputTokens int
+	mu                     sync.Mutex
+}
+
+// resetLastActualTokens forgets the last provider report — called only when the
+// transcript's identity changes, so a new view cannot inherit the previous
+// session's usage.
+func (c *Conversation) resetLastActualTokens() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastActualInputTokens = 0
+	c.lastActualOutputTokens = 0
 }
 
 // Default context window used when MaxTokens is not specified.
@@ -75,6 +89,13 @@ func (c *Conversation) AddActualTokens(input, output int) {
 	defer c.mu.Unlock()
 	c.actualInputTokens = input
 	c.actualOutputTokens = output
+	// The LAST reported pair survives ResetActualTokens: the live counters are
+	// the accounting basis and legitimately go stale when the transcript is
+	// rewritten mid-turn (tool output stubbed, window trimmed), but the host
+	// still needs the provider's number to stamp the turn's usage fact. Losing
+	// it is how a session ends up showing +≈ forever.
+	c.lastActualInputTokens = input
+	c.lastActualOutputTokens = output
 }
 
 // GetActualTokens returns the real token usage reported by the API.
@@ -82,6 +103,15 @@ func (c *Conversation) GetActualTokens() (input, output int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.actualInputTokens, c.actualOutputTokens
+}
+
+// LastActualTokens returns the most recent provider-reported usage even if the
+// live counters have since been reset (see AddActualTokens). It is zeroed only
+// when the transcript's identity changes (Clear / ReplaceMessages / NewTask).
+func (c *Conversation) LastActualTokens() (input, output int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastActualInputTokens, c.lastActualOutputTokens
 }
 
 // ResetActualTokens resets the real token counters.
@@ -165,6 +195,7 @@ func (c *Conversation) Clear() {
 	c.Messages = make([]Message, 0)
 	c.CurrentTokens = 0
 	c.ResetActualTokens()
+	c.resetLastActualTokens()
 	c.Complete = false
 }
 
@@ -385,6 +416,7 @@ func (c *Conversation) ReplaceMessages(msgs []Message) {
 	c.Messages = msgs
 	c.updateTokenCount()
 	c.ResetActualTokens()
+	c.resetLastActualTokens()
 }
 
 // PatchMessageContent rewrites ONE message's content in place and adjusts
