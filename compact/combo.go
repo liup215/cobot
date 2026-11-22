@@ -27,6 +27,10 @@ import (
 //     the primary's message shape intact, so the primary's anchorable result
 //     is what the host must persist: discarding it there was a persistence
 //     hole (a summarized session reloaded as the full transcript).
+//   - Once the primary has rewritten the conversation, the fallback's own
+//     Result indices address the POST-primary shape; they must never be
+//     persisted against the caller's pre-compaction snapshot (see the
+//     coordinate-space note inside Compact), so the primary's result wins.
 type Combo struct {
 	// Primary runs first (typically *Summarize).
 	Primary Strategy
@@ -79,12 +83,25 @@ func (c *Combo) Compact(ctx context.Context, conv *types.Conversation) (Result, 
 		// watermark — its (anchorable) result describes the final state.
 		return primaryResult, nil
 	}
-	// The fallback rewrote the conversation on top of (or instead of) the
-	// primary. When it kept the same rows (Trim's hard trim rewrites message
-	// content in place) the primary's anchor still describes the final shape,
-	// so its result is the one to persist; when the fallback dropped or
-	// inserted rows its own result describes the final state.
-	rowsBefore := conv.MessageCount()
+	// The fallback now runs on top of (or instead of) the primary.
+	//
+	// CRITICAL: Result indices are pre-compaction indices — the host persists
+	// them against the transcript it snapshotted BEFORE this Compact call.
+	// Once the primary has REPLACED the conversation (it dropped rounds and
+	// inserted a summary row), the fallback sees a different, shorter shape,
+	// so its KeptFromIndex addresses the POST-primary transcript. Persisting
+	// that number against the pre-compaction snapshot lands the anchor far
+	// too early and the restored transcript brings back everything the
+	// summarize had just dropped — on the desktop this reads as "compaction
+	// completed, then the whole history came back".
+	//
+	// So: as soon as the primary rewrote the conversation, the primary's
+	// anchorable result is the ONE result whose indices are in pre-compaction
+	// coordinates. Whatever extra rounds the fallback drops afterwards are a
+	// further optimization that is simply not persisted (the same safe
+	// status quo as Trim's non-anchorable passes: the host keeps what it has
+	// and the rows return on reload). Only when the primary did not touch the
+	// conversation does the fallback's shape match the snapshot.
 	res, err := c.Fallback.Compact(ctx, conv)
 	if err != nil {
 		if primaryErr != nil {
@@ -92,7 +109,7 @@ func (c *Combo) Compact(ctx context.Context, conv *types.Conversation) (Result, 
 		}
 		return Result{}, err
 	}
-	if primaryErr == nil && primaryResult.Anchorable && conv.MessageCount() == rowsBefore {
+	if primaryErr == nil && primaryResult.Anchorable {
 		return primaryResult, nil
 	}
 	return res, nil

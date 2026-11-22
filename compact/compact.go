@@ -150,6 +150,14 @@ type Result struct {
 	// no-op runs are NOT anchorable — the host keeps the full transcript
 	// and re-compacts on the next load (the safe status quo).
 	Anchorable bool
+	// PreLen is the message count of the transcript the indices above
+	// address (the PRE-compaction conversation this strategy was handed).
+	// Hosts persist anchors resolved against their own pre-compaction
+	// snapshot, so a result whose PreLen does not match that snapshot's
+	// length cannot be persisted — a mismatch means the indices point into
+	// a different (shorter) shape and would anchor far too early, restoring
+	// everything the compaction dropped.
+	PreLen int
 }
 
 // Round is one conversational turn: a user message together with everything

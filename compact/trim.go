@@ -244,6 +244,7 @@ func (t *Trim) dropOldestRounds(conv *types.Conversation) Result {
 	if !ok {
 		return Result{}
 	}
+	preLen := len(conv.Messages) // the shape the result's indices address
 	conv.ReplaceMessages(plan.msgs)
 	slog.Info("compact: trim dropped oldest rounds",
 		"rounds", plan.droppedRounds, "messages", plan.droppedMessages, "tokens", plan.projected)
@@ -268,6 +269,7 @@ func (t *Trim) dropOldestRounds(conv *types.Conversation) Result {
 		KeptFromIndex:     keptFrom,
 		KeptPrefixIndices: prefix,
 		Anchorable:        anchorable,
+		PreLen:            preLen,
 	}
 }
 

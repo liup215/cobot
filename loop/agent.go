@@ -932,15 +932,27 @@ func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string,
 
 	// The hard trim is the last safety net: it shrinks oversized tool results
 	// in place, so it runs on the raw ratio (not on the strategy's opinion).
-	// It is announced only when it actually freed tokens.
+	// It is announced only when it actually freed tokens (see the block below).
+	// The hard trim is the last safety net: it shrinks oversized tool results
+	// in place, so it runs on the raw ratio (not on the strategy's opinion).
+	// It is announced only when it actually freed tokens — the shrink itself
+	// is in-memory and instant, so the pair is a notice, not a progress bar;
+	// announcing an attempt that frees nothing would toast "compacting" on
+	// every request iteration of a session whose whole transcript sits inside
+	// the protected window (the "it keeps compacting and nothing changes"
+	// symptom). Whatever is announced, Start and End always come in pairs:
+	// an unpaired Start leaves the host's compacting state open forever. And
+	// the host's pre-compaction snapshot is only taken on a strategy
+	// compaction's Start — an attempt-only trim must not overwrite it with a
+	// post-compaction shape.
 	if conv.GetTotalTokens() > budget*highPct/100 {
 		before := conv.GetTotalTokens()
-		if callback != nil {
-			callback.OnCompactionStart(fmt.Sprintf("hard trim: conversation at %d/%d tokens", before, budget))
-		}
 		conv.TrimToMaxTokens()
-		if callback != nil && conv.GetTotalTokens() < before {
-			callback.OnCompactionEnd(fmt.Sprintf("compaction complete: %d tokens remaining", conv.GetTotalTokens()))
+		if after := conv.GetTotalTokens(); after < before {
+			if callback != nil {
+				callback.OnCompactionStart(fmt.Sprintf("hard trim: conversation at %d/%d tokens", before, budget))
+				callback.OnCompactionEnd(fmt.Sprintf("compaction complete: %d tokens remaining", after))
+			}
 		}
 	}
 }

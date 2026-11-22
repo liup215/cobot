@@ -40,6 +40,12 @@ func (s *Store) StampUsage(sessionID string, input, output int) error {
 // SaveCompaction upserts the session's compaction entry (latest wins — an
 // older summary is absorbed into the new one, so the anchor only moves
 // forward). Stored originals are never rewritten.
+//
+// The forward-only rule is enforced in SQL (`WHERE excluded.kept_after_seq >=
+// compactions.kept_after_seq`), not just documented: a stale or mis-indexed
+// result must never replace a further-along anchor, because a lower anchor
+// restores rows an earlier compaction already dropped — to the user, the
+// compaction silently undoes itself.
 func (s *Store) SaveCompaction(c *Compaction) error {
 	if err := s.ensure(); err != nil {
 		return err
@@ -63,7 +69,8 @@ func (s *Store) SaveCompaction(c *Compaction) error {
 			summary_role = excluded.summary_role,
 			kept_after_seq = excluded.kept_after_seq,
 			kept_prefix_seqs = excluded.kept_prefix_seqs,
-			created_at = excluded.created_at`,
+			created_at = excluded.created_at
+		WHERE excluded.kept_after_seq >= compactions.kept_after_seq`,
 		c.SessionID, c.Summary, string(c.SummaryRole), c.KeptAfterSeq, string(prefixJSON), created.Format(time.RFC3339))
 	if err != nil {
 		return fmt.Errorf("transcript: save compaction: %w", err)

@@ -175,6 +175,7 @@ func (s *Summarize) Compact(ctx context.Context, conv *types.Conversation) (Resu
 
 	sys := systemPrefix(conv)
 	body := conv.Messages[sys:]
+	preLen := len(conv.Messages) // the shape the result's indices address
 	rounds := SplitRounds(body)
 	keep := fitKeepRounds(body, rounds, s.keepRounds(), watermark(conv, s.lowWatermark()))
 	if len(rounds) <= keep || keep == 0 {
@@ -234,6 +235,7 @@ func (s *Summarize) Compact(ctx context.Context, conv *types.Conversation) (Resu
 		KeptFromIndex:     sys + cut, // pre-compaction index where the tail starts
 		KeptPrefixIndices: keptPrefix,
 		Anchorable:        true,
+		PreLen:            preLen,
 	}, nil
 }
 

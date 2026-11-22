@@ -595,3 +595,53 @@ func TestContextUsageBaselineSkipsDroppedRows(t *testing.T) {
 		t.Errorf("used = %d, want an estimate of the surviving rows only", used)
 	}
 }
+
+// The anchor is forward-only: a result that anchors BEHIND the stored one would
+// restore rows an earlier compaction already dropped, so the store refuses it
+// instead of letting "latest wins" undo a compaction.
+func TestSaveCompactionAnchorNeverMovesBackward(t *testing.T) {
+	s := openStore(t)
+	id := seed(t, s, 8)
+	if err := s.SaveCompaction(&Compaction{
+		SessionID: id, Summary: "first", SummaryRole: cobottypes.RoleUser,
+		KeptAfterSeq: 5, KeptPrefixSeqs: []int{0},
+	}); err != nil {
+		t.Fatalf("SaveCompaction: %v", err)
+	}
+
+	// A stale/mis-indexed result anchors earlier — rejected, entry unchanged.
+	if err := s.SaveCompaction(&Compaction{
+		SessionID: id, Summary: "behind", SummaryRole: cobottypes.RoleUser,
+		KeptAfterSeq: 2, KeptPrefixSeqs: []int{0},
+	}); err != nil {
+		t.Fatalf("SaveCompaction (backward): %v", err)
+	}
+	c, err := s.LoadCompaction(id)
+	if err != nil || c == nil {
+		t.Fatalf("LoadCompaction: %+v %v", c, err)
+	}
+	if c.Summary != "first" || c.KeptAfterSeq != 5 {
+		t.Fatalf("backward anchor was persisted: %+v", c)
+	}
+	// The rebuilt transcript still reflects the further-along compaction: the
+	// summarized middle cannot come back.
+	msgs, _, err := s.LoadWithSeqs(id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := contents(msgs); len(got) != 1+1+2 { // prefix m0, summary, m6..m7
+		t.Fatalf("rebuilt = %v, want 4 rows", got)
+	}
+
+	// Moving forward still works (equal is a no-op but allowed, e.g. a re-run
+	// of the same summarize).
+	if err := s.SaveCompaction(&Compaction{
+		SessionID: id, Summary: "forward", SummaryRole: cobottypes.RoleUser,
+		KeptAfterSeq: 7, KeptPrefixSeqs: []int{0},
+	}); err != nil {
+		t.Fatalf("SaveCompaction (forward): %v", err)
+	}
+	if c, _ := s.LoadCompaction(id); c == nil || c.Summary != "forward" || c.KeptAfterSeq != 7 {
+		t.Fatalf("forward anchor rejected: %+v", c)
+	}
+}

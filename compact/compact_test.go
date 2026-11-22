@@ -1124,3 +1124,94 @@ func TestLowWatermarkPercent(t *testing.T) {
 		t.Errorf("Combo(70, nil) = %d, want 70", got)
 	}
 }
+
+// TestComboFallbackResultStaysInPreCompactionCoordinates pins the index
+// contract of Result: KeptFromIndex / KeptPrefixIndices always address the
+// PRE-compaction transcript the host snapshotted.
+//
+// The failure mode this guards is the desktop's "compaction completed, then
+// the history came back": Combo runs Summarize (which REPLACES the
+// conversation with a much shorter one) and then a fallback that drops
+// further rounds on top of that shorter transcript. The fallback's indices
+// address the POST-summarize shape; persisted as-is against the caller's
+// pre-compaction snapshot the anchor lands far too early and restores rows
+// the summarize had just dropped.
+//
+// The pinned contract: once the primary has rewritten the conversation, the
+// result Combo returns must be byte-identical to the primary running alone.
+func TestComboFallbackResultStaysInPreCompactionCoordinates(t *testing.T) {
+	exactEstimator(t)
+
+	// Budget tuned so the primary (Summarize) succeeds but leaves the
+	// conversation above the fallback's watermark, and the fallback then has
+	// to drop rounds of its own — the two shapes diverge, which is the point.
+	msgs := protectedMessages()
+	for i := 1; i <= 10; i++ {
+		msgs = append(msgs, roundMessages(i, 100)...)
+	}
+
+	primary := func() *Summarize {
+		return &Summarize{
+			Summarizer:          &fakeSummarizer{summary: strings.Repeat("s", 300)},
+			LowWatermarkPercent: 80,
+			KeepRounds:          6,
+			MaxSummaryTokens:    100000,
+		}
+	}
+
+	// Reference run: the primary alone, on an identical conversation.
+	soloConv := buildConv(1000, msgs...)
+	preLen := len(soloConv.Messages)
+	soloRes, err := primary().Compact(context.Background(), soloConv)
+	if err != nil {
+		t.Fatalf("Summarize alone: %v", err)
+	}
+	if !soloRes.Anchorable {
+		t.Fatalf("primary alone is not anchorable: %+v", soloRes)
+	}
+	soloRows := len(soloConv.Messages)
+
+	// Combo run.
+	conv := buildConv(1000, msgs...)
+	res, err := NewCombo(primary(), NewTrim()).Compact(context.Background(), conv)
+	if err != nil {
+		t.Fatalf("Combo: %v", err)
+	}
+	if !res.Anchorable {
+		t.Fatalf("Combo result is not anchorable: %+v", res)
+	}
+	if len(conv.Messages) >= soloRows {
+		t.Fatalf("scenario is not what the test claims: fallback did not drop rows (primary alone=%d rows, combo=%d rows)",
+			soloRows, len(conv.Messages))
+	}
+	if res.Summary != soloRes.Summary || res.SummaryRole != soloRes.SummaryRole {
+		t.Errorf("Combo summary diverged from the primary's: %q vs %q", res.Summary, soloRes.Summary)
+	}
+	if res.KeptFromIndex != soloRes.KeptFromIndex {
+		t.Fatalf("KeptFromIndex = %d, want %d (the primary's pre-compaction anchor)",
+			res.KeptFromIndex, soloRes.KeptFromIndex)
+	}
+	if strings.Join(intsToStrings(res.KeptPrefixIndices), ",") != strings.Join(intsToStrings(soloRes.KeptPrefixIndices), ",") {
+		t.Errorf("prefix indices = %v, want %v", res.KeptPrefixIndices, soloRes.KeptPrefixIndices)
+	}
+	// PreLen is the length of the transcript those indices address.
+	if res.PreLen != preLen || soloRes.PreLen != preLen {
+		t.Fatalf("PreLen = %d (primary alone %d), want %d", res.PreLen, soloRes.PreLen, preLen)
+	}
+	if res.KeptFromIndex <= 0 || res.KeptFromIndex >= preLen {
+		t.Fatalf("anchor %d outside the pre-compaction transcript (len=%d)", res.KeptFromIndex, preLen)
+	}
+	for _, idx := range res.KeptPrefixIndices {
+		if idx < 0 || idx >= preLen {
+			t.Fatalf("prefix index %d out of pre-compaction range (len=%d)", idx, preLen)
+		}
+	}
+}
+
+func intsToStrings(in []int) []string {
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[i] = fmt.Sprint(v)
+	}
+	return out
+}
