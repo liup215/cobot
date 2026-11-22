@@ -870,8 +870,10 @@ func (a *BaseAgent) SetWorkingDir(dir string) {
 }
 
 // enforceTokenBudget is the single owner of the pre-send budget decision: it
-// compacts above the strategy's low watermark (60% of the window by default)
-// and hard-trims the conversation above 80%. The strategy is consulted first —
+// compacts above the strategy's low watermark (60% of the window by default,
+// whatever the strategy declares — an injected 80% strategy is honored) and
+// hard-trims the conversation above the hard watermark (80%, never earlier
+// than the strategy's own low watermark). The strategy is consulted first —
 // a strategy that cannot free anything (every round inside the protected
 // window) is not run at all, so the loop neither spends a summarizer call nor
 // announces a "context compacted" that changed nothing on every iteration.
@@ -895,6 +897,16 @@ func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string,
 	// Estimate current conversation tokens.
 	total := conv.GetTotalTokens()
 
+	// The watermarks come from the configured strategy (60%/80% for the
+	// cobot defaults): a host that injects an 80% strategy must be triggered
+	// at 80%, not silently pre-gated at the 60% default. The hard trim never
+	// runs BEFORE the strategy's own trigger.
+	lowPct := compact.LowWatermarkPercent(a.compaction)
+	highPct := compact.DefaultHighWatermarkPercent
+	if lowPct > highPct {
+		highPct = lowPct
+	}
+
 	// Add system prompt tokens.
 	total += types.Estimator(systemPrompt)
 
@@ -906,8 +918,8 @@ func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string,
 		}
 	}
 
-	if total > budget*6/10 && (a.compaction == nil || a.compaction.ShouldCompact(conv)) {
-		reason := fmt.Sprintf("token budget %d/%d (60%% threshold)", total, budget)
+	if total > budget*lowPct/100 && (a.compaction == nil || a.compaction.ShouldCompact(conv)) {
+		reason := fmt.Sprintf("token budget %d/%d (%d%% threshold)", total, budget, lowPct)
 		logInfof("Token budget at %d/%d; triggering compaction", total, conv.MaxTokens)
 		if callback != nil {
 			callback.OnCompactionStart(reason)
@@ -921,7 +933,7 @@ func (a *BaseAgent) enforceTokenBudget(ctx context.Context, systemPrompt string,
 	// The hard trim is the last safety net: it shrinks oversized tool results
 	// in place, so it runs on the raw ratio (not on the strategy's opinion).
 	// It is announced only when it actually freed tokens.
-	if conv.GetTotalTokens() > budget*8/10 {
+	if conv.GetTotalTokens() > budget*highPct/100 {
 		before := conv.GetTotalTokens()
 		if callback != nil {
 			callback.OnCompactionStart(fmt.Sprintf("hard trim: conversation at %d/%d tokens", before, budget))

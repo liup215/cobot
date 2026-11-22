@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,7 +19,41 @@ import (
 const (
 	defaultOpenAIBaseURL = "https://api.openai.com/v1"
 	chatCompletionsPath  = "/chat/completions"
+
+	// postFinishGrace bounds the wait for the trailing usage chunk that
+	// OpenAI-compatible servers send AFTER the finish chunk. [DONE] or EOF
+	// ends the stream immediately; this only covers servers that keep the
+	// connection open silently, so one turn pays it at most once.
+	postFinishGrace = 2 * time.Second
 )
+
+// errNoMoreLines reports that a graced read timed out with nothing buffered:
+// the stream is finished, nothing is missing.
+var errNoMoreLines = errors.New("no more SSE lines")
+
+// nextSSELine reads one SSE line. A zero grace blocks until the line, EOF or
+// an error. A positive grace returns errNoMoreLines when nothing arrives in
+// time (the pending read is abandoned; closing the body unblocks it).
+func nextSSELine(r *bufio.Reader, grace time.Duration) (string, error) {
+	if grace <= 0 {
+		return r.ReadString('\n')
+	}
+	type readResult struct {
+		line string
+		err  error
+	}
+	done := make(chan readResult, 1)
+	go func() {
+		line, err := r.ReadString('\n')
+		done <- readResult{line: line, err: err}
+	}()
+	select {
+	case res := <-done:
+		return res.line, res.err
+	case <-time.After(grace):
+		return "", errNoMoreLines
+	}
+}
 
 // buildFullURL constructs the full API URL from base URL
 // If baseURL already ends with /chat/completions, use it as-is
@@ -725,6 +760,11 @@ func (p *OpenAIProvider) CreateMessageStream(ctx context.Context, req *MessageRe
 		idleTimer := time.NewTimer(sseIdleTimeout)
 		defer idleTimer.Stop()
 
+		// finishReason survives the finish chunk so the single Done chunk
+		// below can carry it; usageSeen records whether the trailing usage
+		// chunk (which arrives AFTER the finish chunk) already landed.
+		var finishReason string
+
 		for {
 			select {
 			case <-idleTimer.C:
@@ -743,15 +783,27 @@ func (p *OpenAIProvider) CreateMessageStream(ctx context.Context, req *MessageRe
 				_ = rc.SetReadDeadline(time.Now().Add(30 * time.Second))
 			}
 
-			line, err := reader.ReadString('\n')
+			// Once the finish chunk arrived the turn is over for the model; the
+			// only thing still owed is the trailing usage chunk. Bound that read
+			// to a short grace period so a server that neither sends [DONE] nor
+			// closes the connection cannot stall the turn.
+			grace := time.Duration(0)
+			if finishReason != "" {
+				grace = postFinishGrace
+			}
+			line, err := nextSSELine(reader, grace)
 			if err == nil {
 				idleTimer.Reset(sseIdleTimeout)
 			} else {
-				if err != io.EOF {
+				switch {
+				case errors.Is(err, errNoMoreLines):
+					logDebug("Stream idle after finish chunk; turn complete")
+				case err == io.EOF:
+					logDebug("Stream ended with EOF")
+				default:
 					logDebugf("Error reading stream: %v", err)
 					chunkChan <- StreamChunk{Error: fmt.Errorf("error reading stream: %w", err), Done: true}
-				} else {
-					logDebug("Stream ended with EOF")
+					return
 				}
 				break
 			}
@@ -773,7 +825,6 @@ func (p *OpenAIProvider) CreateMessageStream(ctx context.Context, req *MessageRe
 			data := strings.TrimPrefix(line, "data: ")
 			if data == "[DONE]" {
 				logDebug("Received [DONE] signal")
-				chunkChan <- StreamChunk{Done: true}
 				break
 			}
 
@@ -907,13 +958,23 @@ func (p *OpenAIProvider) CreateMessageStream(ctx context.Context, req *MessageRe
 					}
 				}
 
-				// Send completion with usage info
-				chunkChan <- StreamChunk{
-					FinishReason: choice.FinishReason,
-					Done:         true,
-				}
-				break
+				// Do NOT end the stream here: OpenAI-compatible servers (strict
+				// OpenAI, vLLM, gateways) send the token usage on a SEPARATE
+				// trailing chunk after the finish chunk — breaking here lost it
+				// for good, so the host never saw real usage. Remember the
+				// reason and keep reading; the trailing usage chunk is emitted
+				// by the block above and the single Done chunk is sent once the
+				// stream ends ([DONE], EOF or the post-finish grace period).
+				finishReason = choice.FinishReason
+				continue
 			}
+		}
+
+		// Exactly one Done chunk per stream, always last: the loop ends the
+		// turn on it, so anything emitted afterwards would never be read.
+		chunkChan <- StreamChunk{
+			FinishReason: finishReason,
+			Done:         true,
 		}
 	}()
 

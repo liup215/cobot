@@ -92,6 +92,42 @@ type Strategy interface {
 	Compact(ctx context.Context, conv *types.Conversation) (Result, error)
 }
 
+// LowWatermarkPercent reports the trigger watermark a strategy compacts at, so
+// the loop's pre-send budget check and the strategy can never disagree about
+// when compaction starts (a host that asks for 80% must not be pre-gated at
+// the 60% default). A Combo reports the EARLIEST watermark among its parts —
+// the loop still AND-s this cheap check with ShouldCompact, so returning the
+// minimum can never fire a compaction the strategy did not want.
+// Nil, unknown and custom strategies report DefaultLowWatermarkPercent.
+func LowWatermarkPercent(s Strategy) int {
+	switch v := s.(type) {
+	case *Summarize:
+		if v != nil {
+			return v.lowWatermark()
+		}
+	case *Trim:
+		if v != nil {
+			return v.lowWatermark()
+		}
+	case *Combo:
+		if v != nil {
+			lo := 0
+			for _, sub := range []Strategy{v.Primary, v.Fallback} {
+				if sub == nil {
+					continue
+				}
+				if p := LowWatermarkPercent(sub); lo == 0 || p < lo {
+					lo = p
+				}
+			}
+			if lo > 0 {
+				return lo
+			}
+		}
+	}
+	return DefaultLowWatermarkPercent
+}
+
 // Result reports what one compaction did — the typed alternative to making
 // hosts reverse-engineer the outcome from message diffs.
 type Result struct {

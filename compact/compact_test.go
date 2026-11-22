@@ -1092,3 +1092,35 @@ func TestTrimKeepWindowShrinksToFit(t *testing.T) {
 		t.Error("the newest round must never be dropped")
 	}
 }
+
+// TestLowWatermarkPercent verifies the exported watermark report the agent
+// loop uses for its pre-send trigger: an injected strategy's percentage must
+// reach the loop (a host asking for 80% was silently gated at the 60%
+// default), a Combo reports its earliest part, and unknown strategies fall
+// back to the default.
+func TestLowWatermarkPercent(t *testing.T) {
+	if got := LowWatermarkPercent(nil); got != DefaultLowWatermarkPercent {
+		t.Errorf("nil strategy = %d, want %d", got, DefaultLowWatermarkPercent)
+	}
+	if got := LowWatermarkPercent(NewTrim()); got != DefaultLowWatermarkPercent {
+		t.Errorf("zero-value Trim = %d, want %d", got, DefaultLowWatermarkPercent)
+	}
+	if got := LowWatermarkPercent(&Summarize{LowWatermarkPercent: 80}); got != 80 {
+		t.Errorf("Summarize@80 = %d, want 80", got)
+	}
+	if got := LowWatermarkPercent(NewCombo(
+		&Summarize{LowWatermarkPercent: 80},
+		&Trim{LowWatermarkPercent: 80},
+	)); got != 80 {
+		t.Errorf("Combo(80,80) = %d, want 80", got)
+	}
+	if got := LowWatermarkPercent(NewCombo(
+		&Summarize{LowWatermarkPercent: 80},
+		NewTrim(),
+	)); got != DefaultLowWatermarkPercent {
+		t.Errorf("Combo(80, default) = %d, want %d (earliest part)", got, DefaultLowWatermarkPercent)
+	}
+	if got := LowWatermarkPercent(NewCombo(&Summarize{LowWatermarkPercent: 70}, nil)); got != 70 {
+		t.Errorf("Combo(70, nil) = %d, want 70", got)
+	}
+}
