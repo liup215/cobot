@@ -27,6 +27,13 @@ func (a *BaseAgent) processStream(ctx context.Context, streamChan <-chan StreamC
 	var content strings.Builder
 	var reasoning strings.Builder
 	var toolCalls []ToolCall
+	// seenToolCallIDs guards against a provider delivering the same complete
+	// tool call twice (repeated finish block, retried emit, duplicated chunk).
+	// A duplicate must be dropped BEFORE OnToolCallStart and pre-dispatch:
+	// executing it twice both shows the user two cards and runs side-effectful
+	// work twice. Gateway-generated IDs are unique per call, so a repeated ID
+	// is always a re-delivery — never two legitimate identical calls.
+	seenToolCallIDs := make(map[string]bool)
 
 	// Usage rides on the final chunk of a stream as the cumulative total for
 	// that turn. Only the last report is kept, so a provider that repeats a
@@ -95,6 +102,13 @@ streamLoop:
 				} else {
 					// Complete tool call received
 					tc := *chunk.ToolCall
+					if tc.ID != "" {
+						if seenToolCallIDs[tc.ID] {
+							logInfof("Dropping duplicate complete tool call: id=%s name=%s", tc.ID, tc.Name)
+							continue
+						}
+						seenToolCallIDs[tc.ID] = true
+					}
 					toolCalls = append(toolCalls, tc)
 
 					// Notify UI that a tool call has been detected in the stream.

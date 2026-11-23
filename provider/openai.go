@@ -765,6 +765,15 @@ func (p *OpenAIProvider) CreateMessageStream(ctx context.Context, req *MessageRe
 		// chunk (which arrives AFTER the finish chunk) already landed.
 		var finishReason string
 
+		// finishEmitted makes the finish block single-shot. Some OpenAI-compatible
+		// gateways emit the finish reason on more than one chunk (commonly again
+		// on the trailing usage chunk, but any repetition counts). Without this
+		// guard the block re-ran over the accumulated toolCalls map, so every
+		// tool call was delivered — and executed — a second time, in a DIFFERENT
+		// order (Go map iteration starts at a random bucket), which is exactly
+		// the "same tool twice, second batch rotated" symptom seen in the field.
+		var finishEmitted bool
+
 		for {
 			select {
 			case <-idleTimer.C:
@@ -921,6 +930,15 @@ func (p *OpenAIProvider) CreateMessageStream(ctx context.Context, req *MessageRe
 
 			// Check finish reason
 			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+				if finishEmitted {
+					// A repeated finish chunk must not re-deliver the tool calls
+					// accumulated above: the consumer would execute each of them
+					// again. Keep reading only for the trailing usage chunk.
+					logDebugf("Ignoring repeated finish chunk: reason=%s", choice.FinishReason)
+					continue
+				}
+				finishEmitted = true
 				logDebugf("Stream finished with reason: %s", choice.FinishReason)
 
 				// Send final complete tool calls - only if they have valid JSON arguments
@@ -965,7 +983,6 @@ func (p *OpenAIProvider) CreateMessageStream(ctx context.Context, req *MessageRe
 				// reason and keep reading; the trailing usage chunk is emitted
 				// by the block above and the single Done chunk is sent once the
 				// stream ends ([DONE], EOF or the post-finish grace period).
-				finishReason = choice.FinishReason
 				continue
 			}
 		}
