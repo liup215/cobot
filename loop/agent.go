@@ -561,7 +561,18 @@ func (a *BaseAgent) RunWithCallback(ctx context.Context, prompt string, callback
 			}
 		}
 
-		// Execute any tool calls from the last assistant message
+		// Execute any tool calls from the last assistant message.
+		//
+		// Await the in-flight pre-dispatch goroutines FIRST. The stream is over,
+		// so the overlap they were created for has already been paid for; but a
+		// goroutine that is still running has not recorded its result yet, and
+		// executeToolCalls would treat that as "not pre-dispatched" and run the
+		// body a SECOND time. That is a duplicate side effect with only one tool
+		// result in the transcript — the failure mode seen in the wild as
+		// duplicated syllabus/chapter rows. Add() only happens inside
+		// processStream (already returned here), so this Wait cannot race with a
+		// new Add.
+		a.preDispatchWG.Wait()
 		messages := a.conversation.GetMessages()
 		if len(messages) > 0 {
 			lastMsg := messages[len(messages)-1]
