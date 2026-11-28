@@ -48,7 +48,7 @@ res, err := agent.Run(ctx, "fix the login bug")
 | `BaseURL` | `string` | 官方 OpenAI API | 端点覆盖，如 `https://ark.cn-beijing.volces.com/api/v3` |
 | `Model` | `string` | provider 默认（`gpt-4`） | 发送给 provider 的模型名 |
 | `Provider` | `cobot.Provider` | nil | 注入完全自定义后端（非 OpenAI 协议、测试替身），设置后绕过 `APIKey`/`BaseURL` |
-| `Tools` | `*cobot.ToolRegistry` | `tools.InitDefaultRegistry()`（内置十件套） | 暴露给模型的工具注册表；扩展默认工具集可从 `InitDefaultRegistry()` 起步再 `Register` |
+| `Tools` | `*cobot.ToolRegistry` | `tools.InitDefaultRegistry()`（内置十二件套） | 暴露给模型的工具注册表；扩展默认工具集可从 `InitDefaultRegistry()` 起步再 `Register` |
 | `Mode` | `cobot.Mode` | `ModeAct` | 初始模式：`ModeAct` 执行修改；`ModePlan` 只探索规划（写工具隐藏） |
 | `AutoApprove` | `bool` | false | yolo 模式跳过逐工具审批；推荐用 `Guard` 控制执行（见 `Guard` 行） |
 | `MaxConsecutiveMistakes` | `int` | 3 | 模型连续多少回合未调用工具即中止 run |
@@ -157,8 +157,8 @@ agent, _ := cobot.NewAgent(cobot.Config{
 
 ## 内置工具行为定稿
 
-默认 Registry（`tools.InitDefaultRegistry()`）注册十件工具，行为均已用测试钉死
-（`tools/behavior_test.go`）：
+默认 Registry（`tools.InitDefaultRegistry()`）注册十二件工具，行为均已用测试钉死
+（`tools/behavior_test.go`、`tools/web_search_test.go`）：
 
 | 工具 | 行为定稿 |
 |---|---|
@@ -172,9 +172,32 @@ agent, _ := cobot.NewAgent(cobot.Config{
 | `attempt_completion` | 终结工具：必填 `result`，可选 `command`（建议用户复核结果的命令） |
 | `ask_followup_question` | 澄清问题，不终结运行；`SetHandler` 注入交互端（TUI/宿主），未注入时回退 stdin；支持按选项序号作答；`allow_multiple` 声明多选（宿主实现 `provider.MultiAskCallback` 收到标志，序号 `1,3` 逐项映射为 `a, c`）；headless 下 handler 返回错误时错误文本回传模型、run 继续 |
 | `plan_mode_respond` | Plan 模式终结工具：响应原样回显给用户 |
+| `web_search` | **联网搜索（零配置可用）**：`query` / `queries[]`（≤4，最多 3 条并发）走 provider 链（默认 Exa 公共 MCP 端点，**无需 key**；`TAVILY_API_KEY` 追加 Tavily）；`numResults` ≤10、`recencyFilter`(day/week/month/year)、`domainFilter`（`-` 前缀=排除，Exa 不支持结构化过滤时编进查询文本，绝不静默放宽）。**返回永远有界**：每条命中只给 title/URL/`snippet`（≤400 rune），超出预算的命中计入 `omittedResults`；**全量 provider 文本存入 store**，用返回的 `responseId`（`s_…`）交给 `get_search_content` 读。逐查询独立降级：一条查询的 provider 失败不丢其他查询的结果，错误串里点明试过哪家 |
+| `get_search_content` | **读回 web_search 存的全文**：`responseId` + `offset`/`limit`（**rune 偏移**，中文与英文同页大小，默认 6000、上限 12000）分页；或 `findText`（string/数组）+ `findMode`（exact/case-insensitive/fuzzy）返回 ±400 rune 的命中上下文与 rune 偏移。fuzzy 按段落 token 编辑距离（词长 ≥9 容 2、≥5 容 1）匹配，「limiting factors」能找到「limiting factor」；中文无空格查询自动回落为包含匹配。过期（1h）/未知 id 一律 `response not found` 并要求重新搜索，**不返回空页** |
 
 文件/命令类工具**不做工作目录沙箱**（gline 基线语义）：路径可以指向工作目录之外，
 执行控制请通过 `Config.Guard`（`ToolGuard`）实现。
+
+## 联网搜索（`web_search` / `get_search_content`）
+
+**零配置即可用**：provider 链第一环是 Exa 的公共 MCP 端点（`https://mcp.exa.ai/mcp`），
+不需要任何 API key；实测在中国大陆网络下可用（1.4s 返回 3 条带正文摘录的结果）。
+
+| 环境变量 | 说明 |
+|---|---|
+| `COBOT_WEB_PROVIDER` | provider 顺序，如 `tavily,exa`（默认 `exa,tavily`；没配 key 的自动**跳过**而不是报错） |
+| `COBOT_TAVILY_API_KEY` | 追加 Tavily（也接受 `TAVILY_API_KEY`）；没配就不进链 |
+| `COBOT_WEB_TIMEOUT` | 单次请求超时（Go duration 语法，默认 20s） |
+
+设计要点（为什么拆成两个工具、为什么返回有界、为什么必须存 `responseId`）写在
+`websearch` 包的包注释里；为什么不做 Bing/Google HTML 抓取也写在那里（Bing 的 RSS 输
+出带有“仅限个人非商业 RSS 阅读器使用”的许可声明，产品不能把它当通用搜索后端）。
+
+真实端点自测（不走单测，需显式开启）：
+
+```bash
+COBOT_WEB_LIVE=1 go test ./websearch/ -run Live -v
+```
 
 ## Skills（渐进披露的指令文件）
 

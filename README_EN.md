@@ -184,8 +184,9 @@ agent, _ := cobot.NewAgent(cobot.Config{
 
 ## Built-in Tool Behavior (finalized)
 
-The default registry (`tools.InitDefaultRegistry()`) registers ten tools; every
-behavior below is pinned by tests (`tools/behavior_test.go`):
+The default registry (`tools.InitDefaultRegistry()`) registers twelve tools; every
+behavior below is pinned by tests (`tools/behavior_test.go`,
+`tools/web_search_test.go`):
 
 | Tool | Finalized behavior |
 |---|---|
@@ -199,6 +200,8 @@ behavior below is pinned by tests (`tools/behavior_test.go`):
 | `attempt_completion` | Terminal tool: `result` required, optional `command` (a command for the user to verify the result) |
 | `ask_followup_question` | Clarification question, does not end the run; `SetHandler` injects the interaction side (TUI/host), falling back to stdin; answers may be given by option index; `allow_multiple` declares a multi-select (hosts implementing `provider.MultiAskCallback` receive the flag, index `1,3` maps to `a, c` item by item); in headless use a handler error is fed back to the model as text and the run continues |
 | `plan_mode_respond` | Plan-mode terminal tool: the response is echoed back verbatim |
+| `web_search` | **Web search that works with zero configuration**: `query` / `queries[]` (max 4, three in flight) run down a provider chain (Exa's public MCP endpoint by default, **no key needed**; `TAVILY_API_KEY` appends Tavily), with `numResults` ≤10, `recencyFilter` (day/week/month/year) and `domainFilter` (`-` prefix excludes). When a provider ignores structured filters (Exa's public tool does) the constraints are folded into the query text — never silently dropped. **The answer is always bounded**: each hit shows title/URL/`snippet` (≤400 runes), hits past the inline budget are counted in `omittedResults`, and the FULL provider text is stored for `get_search_content` under the returned `responseId` (`s_…`). Each query degrades independently: one provider failure never discards another query's results, and the error text names what was tried |
+| `get_search_content` | **Reads back what `web_search` stored**: page with `responseId` + `offset`/`limit` (**rune** offsets, so a Chinese page pages at the same size as an English one; default 6000, max 12000), or pass `findText` (string or array) with `findMode` (exact/case-insensitive/fuzzy) to get ±400-rune passages around each match plus the match's rune offset. Fuzzy matches per paragraph by token edit distance (2 edits from 9 runes, 1 from 5), so "limiting factors" finds "limiting factor"; a whitespace-free CJK query falls back to containment. Unknown or expired ids (1h) answer `response not found` and say to search again — never an empty page |
 
 File/command tools deliberately do **no working-directory sandboxing** (gline
 baseline): paths may point outside the working directory; control execution with
@@ -209,7 +212,8 @@ baseline): paths may point outside the working directory; control execution with
 - `github.com/liup215/cobot`, Go 1.25, runtime dependencies = 0 (stdlib only)
 - Package layout: root facade (`cobot.NewAgent(Config)`) / `types` / `provider`
   (OpenAI-compatible + **anthropic** + mock/scripted) / `tools` (registry +
-  ToolGuard + XML fallback) / `loop` / `compact` (Trim + Summarize + Combo) /
+  ToolGuard + XML fallback) / `websearch` (provider chain + bounded result
+  store behind the web tools) / `loop` / `compact` (Trim + Summarize + Combo) /
   `examples`
 - Inherited from gline (Cline): the `attempt_completion` terminal protocol,
   Plan/Act, the correction loop, stream pre-dispatch, the reasoning channel

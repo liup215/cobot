@@ -3,8 +3,9 @@ package tools
 // InitDefaultRegistry initializes a registry with the cobot built-in tool
 // surface — gline-aligned names (2026-11 tool-surface alignment):
 // read / ls / write / edit / grep / glob / run plus the three interaction
-// tools. Every tool the system prompt tells the model about must be
-// registered here — loop's prompt-guard test enforces this.
+// tools, plus the web pair (web_search / get_search_content). Every tool the
+// system prompt tells the model about must be registered here — loop's
+// prompt-guard test enforces this.
 //
 // list_code_definition_names stays implemented (search.go) but is NOT
 // registered, mirroring gline's 2026-09-21 tool pruning; re-register it
@@ -53,6 +54,24 @@ func InitDefaultRegistry() *Registry {
 	registry.Register(&ToolInfo{
 		Tool:                 NewGlobTool(),
 		Category:             CategorySearch,
+		AllowedModes:         []string{"plan", "act"},
+		RequiresConfirmation: false,
+	})
+
+	// Web access - allowed in both modes. web_search reads the network and
+	// stores its answer; get_search_content reads that store back. Neither
+	// writes to the filesystem or executes anything, so plan mode keeps both:
+	// "what does the current spec say" is a planning question.
+	registry.Register(&ToolInfo{
+		Tool:                 NewWebSearchTool(),
+		Category:             CategoryNetwork,
+		AllowedModes:         []string{"plan", "act"},
+		RequiresConfirmation: false,
+	})
+
+	registry.Register(&ToolInfo{
+		Tool:                 NewGetSearchContentTool(),
+		Category:             CategoryNetwork,
 		AllowedModes:         []string{"plan", "act"},
 		RequiresConfirmation: false,
 	})
