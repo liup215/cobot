@@ -48,7 +48,7 @@ res, err := agent.Run(ctx, "fix the login bug")
 | `BaseURL` | `string` | 官方 OpenAI API | 端点覆盖，如 `https://ark.cn-beijing.volces.com/api/v3` |
 | `Model` | `string` | provider 默认（`gpt-4`） | 发送给 provider 的模型名 |
 | `Provider` | `cobot.Provider` | nil | 注入完全自定义后端（非 OpenAI 协议、测试替身），设置后绕过 `APIKey`/`BaseURL` |
-| `Tools` | `*cobot.ToolRegistry` | `tools.InitDefaultRegistry()`（内置十二件套） | 暴露给模型的工具注册表；扩展默认工具集可从 `InitDefaultRegistry()` 起步再 `Register` |
+| `Tools` | `*cobot.ToolRegistry` | `tools.InitDefaultRegistry()`（内置十三件套） | 暴露给模型的工具注册表；扩展默认工具集可从 `InitDefaultRegistry()` 起步再 `Register` |
 | `Mode` | `cobot.Mode` | `ModeAct` | 初始模式：`ModeAct` 执行修改；`ModePlan` 只探索规划（写工具隐藏） |
 | `AutoApprove` | `bool` | false | yolo 模式跳过逐工具审批；推荐用 `Guard` 控制执行（见 `Guard` 行） |
 | `MaxConsecutiveMistakes` | `int` | 3 | 模型连续多少回合未调用工具即中止 run |
@@ -157,7 +157,7 @@ agent, _ := cobot.NewAgent(cobot.Config{
 
 ## 内置工具行为定稿
 
-默认 Registry（`tools.InitDefaultRegistry()`）注册十二件工具，行为均已用测试钉死
+默认 Registry（`tools.InitDefaultRegistry()`）注册十三件工具，行为均已用测试钉死
 （`tools/behavior_test.go`、`tools/web_search_test.go`）：
 
 | 工具 | 行为定稿 |
@@ -173,12 +173,13 @@ agent, _ := cobot.NewAgent(cobot.Config{
 | `ask_followup_question` | 澄清问题，不终结运行；`SetHandler` 注入交互端（TUI/宿主），未注入时回退 stdin；支持按选项序号作答；`allow_multiple` 声明多选（宿主实现 `provider.MultiAskCallback` 收到标志，序号 `1,3` 逐项映射为 `a, c`）；headless 下 handler 返回错误时错误文本回传模型、run 继续 |
 | `plan_mode_respond` | Plan 模式终结工具：响应原样回显给用户 |
 | `web_search` | **联网搜索（零配置可用）**：`query` / `queries[]`（≤4，最多 3 条并发）走 provider 链（默认 Exa 公共 MCP 端点，**无需 key**；`TAVILY_API_KEY` 追加 Tavily）；`numResults` ≤10、`recencyFilter`(day/week/month/year)、`domainFilter`（`-` 前缀=排除，Exa 不支持结构化过滤时编进查询文本，绝不静默放宽）。**返回永远有界**：每条命中只给 title/URL/`snippet`（≤400 rune），超出预算的命中计入 `omittedResults`；**全量 provider 文本存入 store**，用返回的 `responseId`（`s_…`）交给 `get_search_content` 读。逐查询独立降级：一条查询的 provider 失败不丢其他查询的结果，错误串里点明试过哪家 |
+| `fetch_content` | **读一整页（搜索之外的另一半）**：给 URL（≤3 个/次），`mode: readable`（默认）把 HTML 经 readability 提正文再转 markdown（导航/脚本丢弃，标题/列表/链接保留），PDF 与 Office/EPUB 交给 `docparse` 抽文本，`raw` 原样返回（API/JSON/纯文本，非 2xx 也保留 body 并把 status 写进结果）。**返回有界摘录（≤4000 rune）+ `responseId`（`f_…`），全文入 store**。逐 URL 独立失败（一个死链不废其他）。**私网/本机地址硬拦**：`localhost`、`10/8`、`172.16/12`、`192.168/16`、`169.254/16`（含云元数据）、`100.64/10`、`::1`、`fc00::/7`、`fe80::/10`，且**按解析后的 IP 拦**（`Dialer.Control`）＋**每一跳重定向复检**；`file:`/`data:` 等非 http(s) 一律拒。单响应 5MB 上限、25s 超时。不做：渲染 JS、cookie 登录、抓取链接、视频 |
 | `get_search_content` | **读回 web_search 存的全文**：`responseId` + `offset`/`limit`（**rune 偏移**，中文与英文同页大小，默认 6000、上限 12000）分页；或 `findText`（string/数组）+ `findMode`（exact/case-insensitive/fuzzy）返回 ±400 rune 的命中上下文与 rune 偏移。fuzzy 按段落 token 编辑距离（词长 ≥9 容 2、≥5 容 1）匹配，「limiting factors」能找到「limiting factor」；中文无空格查询自动回落为包含匹配。过期（1h）/未知 id 一律 `response not found` 并要求重新搜索，**不返回空页** |
 
 文件/命令类工具**不做工作目录沙箱**（gline 基线语义）：路径可以指向工作目录之外，
 执行控制请通过 `Config.Guard`（`ToolGuard`）实现。
 
-## 联网搜索（`web_search` / `get_search_content`）
+## 联网搜索与抓页（`web_search` / `fetch_content` / `get_search_content`）
 
 **零配置即可用**：provider 链第一环是 Exa 的公共 MCP 端点（`https://mcp.exa.ai/mcp`），
 不需要任何 API key；实测在中国大陆网络下可用（1.4s 返回 3 条带正文摘录的结果）。
@@ -189,9 +190,13 @@ agent, _ := cobot.NewAgent(cobot.Config{
 | `COBOT_TAVILY_API_KEY` | 追加 Tavily（也接受 `TAVILY_API_KEY`）；没配就不进链 |
 | `COBOT_WEB_TIMEOUT` | 单次请求超时（Go duration 语法，默认 20s） |
 
-设计要点（为什么拆成两个工具、为什么返回有界、为什么必须存 `responseId`）写在
-`websearch` 包的包注释里；为什么不做 Bing/Google HTML 抓取也写在那里（Bing 的 RSS 输
+设计要点（为什么拆成三个工具、为什么返回有界、为什么必须存 `responseId`、SSRF 门为何按解析后 IP 拦）写在
+`websearch` 包的包注释和 `websearch/ssrf.go` 里；为什么不做 Bing/Google HTML 抓取也写在那里（Bing 的 RSS 输
 出带有“仅限个人非商业 RSS 阅读器使用”的许可声明，产品不能把它当通用搜索后端）。
+
+新增依赖（纯 Go，无 cgo）：`go-shiori/go-readability`（正文提取）、`JohannesKaufmann/html-to-markdown/v2`
+（HTML→Markdown）、`golang.org/x/net/html/charset`（GBK/Shift_JIS 等编码）；PDF/Office 复用仓库内已有的
+`docparse`。
 
 真实端点自测（不走单测，需显式开启）：
 

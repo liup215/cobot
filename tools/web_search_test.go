@@ -126,7 +126,7 @@ func TestWebSearchThenReadStoredPages(t *testing.T) {
 	search := runSearch(t, client, map[string]any{"query": "enzymes"})
 	id := search.ResponseID
 
-	first := runContent(t, client, map[string]any{"responseId": id, "limit": 100})
+	first := runContent(t, NewGetSearchContentToolWith(client), map[string]any{"responseId": id, "limit": 100})
 	if utf8Len(first.Content) != 100 {
 		t.Fatalf("first page = %d runes, want 100", utf8Len(first.Content))
 	}
@@ -146,7 +146,7 @@ func TestWebSearchThenReadStoredPages(t *testing.T) {
 	var page contentPayload
 	next := first.NextOffset
 	for next > 0 {
-		page = runContent(t, client, map[string]any{"responseId": id, "offset": next, "limit": 400})
+		page = runContent(t, NewGetSearchContentToolWith(client), map[string]any{"responseId": id, "offset": next, "limit": 400})
 		all.WriteString(page.Content)
 		next = page.NextOffset
 	}
@@ -160,7 +160,7 @@ func TestGetSearchContentFindText(t *testing.T) {
 	client := stubClient(&stubProvider{name: "exa", snippet: "Light intensity affects the rate of photosynthesis. Temperature matters too."})
 	search := runSearch(t, client, map[string]any{"query": "photosynthesis"})
 
-	found := runFind(t, client, map[string]any{"responseId": search.ResponseID, "findText": "temperature"})
+	found := runFind(t, NewGetSearchContentToolWith(client), map[string]any{"responseId": search.ResponseID, "findText": "temperature"})
 	if found.TotalMatches != 1 || len(found.Passages) != 1 {
 		t.Fatalf("found = %+v", found)
 	}
@@ -169,7 +169,7 @@ func TestGetSearchContentFindText(t *testing.T) {
 	}
 
 	// A list of terms is accepted too.
-	multi := runFind(t, client, map[string]any{
+	multi := runFind(t, NewGetSearchContentToolWith(client), map[string]any{
 		"responseId": search.ResponseID,
 		"findText":   []string{"light intensity", "temperature"},
 	})
@@ -230,9 +230,9 @@ func TestWebSearchRequiresAQuery(t *testing.T) {
 	}
 }
 
-// TestWebToolsAreRegisteredTogether asserts the pair is in the default registry
+// TestWebToolsAreRegisteredTogether asserts the triple is in the default registry
 // for BOTH modes: a bounded answer with no reader would be dead weight, and
-// searching is a legitimate planning action.
+// searching/fetching is a legitimate planning action.
 func TestWebToolsAreRegisteredTogether(t *testing.T) {
 	registry := InitDefaultRegistry()
 
@@ -241,7 +241,7 @@ func TestWebToolsAreRegisteredTogether(t *testing.T) {
 		for _, tool := range registry.GetForMode(mode) {
 			names[tool.Name()] = true
 		}
-		for _, want := range []string{"web_search", "get_search_content"} {
+		for _, want := range []string{"web_search", "fetch_content", "get_search_content"} {
 			if !names[want] {
 				t.Errorf("mode %s: %s is not registered", mode, want)
 			}
@@ -296,10 +296,17 @@ type findPayload struct {
 	Truncated       bool `json:"truncated"`
 }
 
-func runContent(t *testing.T, client *websearch.Client, input map[string]any) contentPayload {
+// toolExecutor is what both web tools satisfy: a stored response is read through
+// whichever tool holds the shared client, so the test helpers take the tool (not a
+// client) and cannot accidentally build a second one with its own store.
+type toolExecutor interface {
+	Execute(ctx context.Context, input json.RawMessage) (string, error)
+}
+
+func runContent(t *testing.T, tool toolExecutor, input map[string]any) contentPayload {
 	t.Helper()
 	raw, _ := json.Marshal(input)
-	out, err := NewGetSearchContentToolWith(client).Execute(context.Background(), raw)
+	out, err := tool.Execute(context.Background(), raw)
 	if err != nil {
 		t.Fatalf("get_search_content: %v", err)
 	}
@@ -310,10 +317,10 @@ func runContent(t *testing.T, client *websearch.Client, input map[string]any) co
 	return payload
 }
 
-func runFind(t *testing.T, client *websearch.Client, input map[string]any) findPayload {
+func runFind(t *testing.T, tool toolExecutor, input map[string]any) findPayload {
 	t.Helper()
 	raw, _ := json.Marshal(input)
-	out, err := NewGetSearchContentToolWith(client).Execute(context.Background(), raw)
+	out, err := tool.Execute(context.Background(), raw)
 	if err != nil {
 		t.Fatalf("get_search_content: %v", err)
 	}

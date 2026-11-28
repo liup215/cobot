@@ -22,6 +22,7 @@ type Entry struct {
 	Kind      string
 	CreatedAt time.Time
 	Queries   []StoredQuery
+	URLs      []StoredURL
 	runes     int
 }
 
@@ -95,6 +96,25 @@ func NewStore(opts ...StoreOption) *Store {
 	return s
 }
 
+// StoredURL is one fetched page kept in the store.
+//
+// Content is the EXTRACTED text (markdown for HTML, plain text for PDF and
+// text/*), never raw HTML — the point of fetch_content is that the model sees a
+// readable page, and storing the markup would double the size for no gain.
+type StoredURL struct {
+	URL      string
+	Title    string
+	MIMEType string
+	// Via names the pipeline that produced the text: "html" (readability +
+	// markdown), "pdf", "document", "text", "raw". Surfaced in the result so a
+	// reader can tell why a page looks the way it does.
+	Via    string
+	Status int
+	Error  string
+	// Content is the full extracted text; get_search_content pages it.
+	Content string
+}
+
 // Put stores a set of query results and returns its responseId.
 func (s *Store) Put(kind string, queries []StoredQuery) string {
 	stored := make([]StoredQuery, len(queries))
@@ -104,14 +124,25 @@ func (s *Store) Put(kind string, queries []StoredQuery) string {
 		runes += utf8RuneCount(q.Content)
 		stored[i] = q
 	}
+	return s.insert(&Entry{Kind: kind, Queries: stored, runes: runes})
+}
 
-	entry := &Entry{
-		ID:        newResponseID(kind),
-		Kind:      kind,
-		CreatedAt: s.now(),
-		Queries:   stored,
-		runes:     runes,
+// PutFetch stores fetched documents and returns their responseId.
+func (s *Store) PutFetch(urls []StoredURL) string {
+	stored := make([]StoredURL, len(urls))
+	runes := 0
+	for i, u := range urls {
+		u.Content = strings.TrimSpace(u.Content)
+		runes += utf8RuneCount(u.Content)
+		stored[i] = u
 	}
+	return s.insert(&Entry{Kind: KindFetch, URLs: stored, runes: runes})
+}
+
+// insert assigns the id, stamps the time and evicts to fit the caps.
+func (s *Store) insert(entry *Entry) string {
+	entry.ID = newResponseID(entry.Kind)
+	entry.CreatedAt = s.now()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -119,7 +150,7 @@ func (s *Store) Put(kind string, queries []StoredQuery) string {
 	s.pruneExpiredLocked()
 	s.entries[entry.ID] = entry
 	s.order = append(s.order, entry.ID)
-	s.usedRunes += runes
+	s.usedRunes += entry.runes
 
 	// Evict oldest-use first, never the entry just stored (it is the one the
 	// caller is about to read).
@@ -231,12 +262,15 @@ func flatten(q StoredQuery) string {
 	return b.String()
 }
 
-// newResponseID generates "s_" + 12 hex chars. The prefix carries the kind so
-// a mixed transcript shows at a glance what an id refers to.
+// newResponseID generates "s_" / "f_" + 12 hex chars. The prefix carries the
+// kind so a mixed transcript shows at a glance what an id refers to.
 func newResponseID(kind string) string {
 	prefix := "r_"
-	if kind == KindSearch {
+	switch kind {
+	case KindSearch:
 		prefix = "s_"
+	case KindFetch:
+		prefix = "f_"
 	}
 	buf := make([]byte, 6)
 	if _, err := rand.Read(buf); err != nil {

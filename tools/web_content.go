@@ -10,26 +10,48 @@ import (
 	"github.com/liup215/cobot/websearch"
 )
 
-// GetSearchContentTool reads back what web_search stored: one query's complete
-// provider text, in pages, or the passages matching findText.
+// GetSearchContentTool reads back what web_search or fetch_content stored: one
+// entry's complete text, in pages, or the passages matching findText.
 //
-// It is the second half of the pair. Without it web_search would have to return
-// everything inline (context blow-up) or nothing (no way to read the full
-// source), so the two tools are always registered together.
+// It serves BOTH stores on purpose. The memory safety of both tools comes from the
+// same place — a bounded inline answer plus a responseId — so splitting the reader
+// in two would duplicate paging, findText and the expiry message, and the two
+// copies would drift. Which entry a responseId refers to is decided by its entry
+// kind: search results are selected by queryIndex/query, fetched pages by
+// urlIndex/url.
 type GetSearchContentTool struct {
 	BaseTool
 	client *websearch.Client
 }
 
 // getSearchContentInput mirrors the JSON schema. FindText is raw because the
-// schema accepts either one string or an array of them.
+// schema accepts one string or an array of them.
 type getSearchContentInput struct {
 	ResponseID string          `json:"responseId"`
 	QueryIndex *int            `json:"queryIndex"`
+	URLIndex   *int            `json:"urlIndex"`
+	Query      string          `json:"query"`
+	URL        string          `json:"url"`
 	Offset     int             `json:"offset"`
 	Limit      int             `json:"limit"`
 	FindText   json.RawMessage `json:"findText"`
 	FindMode   string          `json:"findMode"`
+}
+
+// contentTarget is the one stored entry this call reads, after both kinds have
+// been reduced to "a label plus some text".
+type contentTarget struct {
+	kind      string
+	index     int
+	label     string // the query text, or the page URL
+	title     string // fetched pages only
+	provider  string
+	searchErr string
+	hits      int
+	content   string
+	// indexParam names the field that selected this entry, so the reply tells the
+	// caller which index to page with next (queryIndex vs urlIndex).
+	indexParam string
 }
 
 // NewGetSearchContentTool builds the tool on the process-wide client.
@@ -37,8 +59,8 @@ func NewGetSearchContentTool() *GetSearchContentTool {
 	return NewGetSearchContentToolWith(websearch.Default())
 }
 
-// NewGetSearchContentToolWith builds the tool on an injected client, which must
-// be the SAME client the search tool used (it owns the store).
+// NewGetSearchContentToolWith builds the tool on an injected client, which must be
+// the SAME client the search/fetch tools used (it owns the store).
 func NewGetSearchContentToolWith(client *websearch.Client) *GetSearchContentTool {
 	if client == nil {
 		client = websearch.Default()
@@ -49,12 +71,25 @@ func NewGetSearchContentToolWith(client *websearch.Client) *GetSearchContentTool
 		"properties": {
 			"responseId": {
 				"type": "string",
-				"description": "The responseId returned by web_search"
+				"description": "The responseId returned by web_search (s_…) or fetch_content (f_…)"
 			},
 			"queryIndex": {
 				"type": "integer",
 				"minimum": 0,
-				"description": "Which query's stored results to read (default 0)"
+				"description": "Which query's stored results to read (web_search responses only, default 0)"
+			},
+			"urlIndex": {
+				"type": "integer",
+				"minimum": 0,
+				"description": "Which fetched page to read (fetch_content responses only, default 0)"
+			},
+			"query": {
+				"type": "string",
+				"description": "Select a search result set by its query text instead of queryIndex"
+			},
+			"url": {
+				"type": "string",
+				"description": "Select a fetched page by its URL instead of urlIndex"
 			},
 			"offset": {
 				"type": "integer",
@@ -87,7 +122,7 @@ func NewGetSearchContentToolWith(client *websearch.Client) *GetSearchContentTool
 	return &GetSearchContentTool{
 		BaseTool: BaseTool{
 			name:        "get_search_content",
-			description: "Read the full text stored by web_search. Pass its responseId and either page with offset/limit, or pass findText to get bounded passages around each match (±400 runes) with rune offsets. Use findText for a fact or a number on a long page; page when you need to read a source end to end. Stored responses expire after an hour — if the id is rejected, run web_search again.",
+			description: "Read the full text stored by web_search or fetch_content. Pass its responseId and either page with offset/limit, or pass findText to get bounded passages around each match (±400 runes) with rune offsets. For a fetched page use urlIndex (or url) to pick the page; for a search response use queryIndex (or query). Use findText for a fact or a number on a long page; page when you need to read a source end to end. Stored responses expire after an hour — if the id is rejected, run the search or fetch again.",
 			inputSchema: schema,
 		},
 		client: client,
@@ -109,98 +144,199 @@ func (t *GetSearchContentTool) Execute(_ context.Context, input json.RawMessage)
 	entry, err := t.client.Store().Get(id)
 	if err != nil {
 		if errors.Is(err, websearch.ErrNotFound) {
-			// One message for unknown AND expired ids: "search again" is the
-			// only useful instruction either way.
-			return "", fmt.Errorf("response not found: %s (stored responses expire after an hour — run web_search again)", id)
+			// One message for unknown AND expired ids: "run it again" is the only
+			// useful instruction either way.
+			return "", fmt.Errorf("response not found: %s (stored responses expire after an hour — run web_search or fetch_content again)", id)
 		}
 		return "", fmt.Errorf("get_search_content: %w", err)
 	}
 
-	index := 0
-	if args.QueryIndex != nil {
-		index = *args.QueryIndex
+	target, err := resolveTarget(entry, args)
+	if err != nil {
+		return "", err
 	}
-	if index < 0 || index >= len(entry.Queries) {
-		return "", fmt.Errorf("queryIndex %d out of range: %d quer%s stored", index, len(entry.Queries), plural(len(entry.Queries)))
-	}
-	query := entry.Queries[index]
 
 	terms, err := parseFindTerms(args.FindText)
 	if err != nil {
 		return "", err
 	}
 
-	out, err := t.read(id, index, query, terms, args)
-	if err != nil {
-		return "", err
+	if len(terms) > 0 {
+		return t.readPassages(id, target, terms, args)
 	}
-	return out, nil
+	return t.readPage(id, target, args)
 }
 
-func (t *GetSearchContentTool) read(
-	id string,
-	index int,
-	query websearch.StoredQuery,
-	terms []string,
-	args getSearchContentInput,
-) (string, error) {
-	if len(terms) > 0 {
-		mode, err := websearch.ParseFindMode(args.FindMode)
-		if err != nil {
-			return "", err
+// resolveTarget picks the stored entry this call reads, refusing the wrong
+// selector loudly: silently falling back to index 0 would return a different
+// source than the caller asked for.
+func resolveTarget(entry *websearch.Entry, args getSearchContentInput) (contentTarget, error) {
+	switch entry.Kind {
+	case websearch.KindFetch:
+		if args.QueryIndex != nil {
+			return contentTarget{}, fmt.Errorf("this responseId holds fetched pages, not search results — use urlIndex (or url) instead of queryIndex")
 		}
-		budget := args.Limit
-		if budget <= 0 || budget > websearch.MaxPageRunes {
-			budget = websearch.MaxPageRunes
+		index := 0
+		if args.URLIndex != nil {
+			index = *args.URLIndex
 		}
-		found := websearch.Find(query.Content, terms, mode, budget)
-		payload := struct {
-			ResponseID string `json:"responseId"`
-			QueryIndex int    `json:"queryIndex"`
-			Query      string `json:"query"`
-			Mode       string `json:"mode"`
-			websearch.FindResult
-		}{
-			ResponseID: id,
-			QueryIndex: index,
-			Query:      query.Query,
-			Mode:       string(mode),
-			FindResult: found,
+		if wanted := strings.TrimSpace(args.URL); wanted != "" {
+			index = -1
+			for i, doc := range entry.URLs {
+				if doc.URL == wanted {
+					index = i
+					break
+				}
+			}
+			if index < 0 {
+				return contentTarget{}, fmt.Errorf("url not found in this response: %s (it holds %d page(s); omit url to read page 0)", wanted, len(entry.URLs))
+			}
 		}
-		encoded, err := json.MarshalIndent(payload, "", "  ")
-		if err != nil {
-			return "", fmt.Errorf("get_search_content: encode result: %w", err)
+		if index < 0 || index >= len(entry.URLs) {
+			return contentTarget{}, fmt.Errorf("urlIndex %d out of range: %d page(s) stored", index, len(entry.URLs))
 		}
-		return string(encoded), nil
+		doc := entry.URLs[index]
+		if doc.Error != "" && doc.Content == "" {
+			return contentTarget{}, fmt.Errorf("page %d was not stored: %s", index, doc.Error)
+		}
+		return contentTarget{
+			kind:       entry.Kind,
+			index:      index,
+			label:      doc.URL,
+			title:      doc.Title,
+			searchErr:  doc.Error,
+			content:    doc.Content,
+			hits:       1,
+			indexParam: "urlIndex",
+		}, nil
+
+	default:
+		if args.URLIndex != nil || strings.TrimSpace(args.URL) != "" {
+			return contentTarget{}, fmt.Errorf("this responseId holds search results, not fetched pages — use queryIndex (or query) instead of urlIndex")
+		}
+		index := 0
+		if args.QueryIndex != nil {
+			index = *args.QueryIndex
+		}
+		if wanted := strings.TrimSpace(args.Query); wanted != "" {
+			index = -1
+			for i, query := range entry.Queries {
+				if strings.EqualFold(query.Query, wanted) {
+					index = i
+					break
+				}
+			}
+			if index < 0 {
+				return contentTarget{}, fmt.Errorf("query not found in this response: %s (it holds %d quer%s; omit query to read the first)", wanted, len(entry.Queries), plural(len(entry.Queries)))
+			}
+		}
+		if index < 0 || index >= len(entry.Queries) {
+			return contentTarget{}, fmt.Errorf("queryIndex %d out of range: %d quer%s stored", index, len(entry.Queries), plural(len(entry.Queries)))
+		}
+		query := entry.Queries[index]
+		return contentTarget{
+			kind:       entry.Kind,
+			index:      index,
+			label:      query.Query,
+			provider:   query.Provider,
+			searchErr:  query.Error,
+			content:    query.Content,
+			hits:       len(query.Results),
+			indexParam: "queryIndex",
+		}, nil
+	}
+}
+
+// readPage answers with one page of the stored text.
+func (t *GetSearchContentTool) readPage(id string, target contentTarget, args getSearchContentInput) (string, error) {
+	page, total, next := websearch.SliceContent(target.content, args.Offset, args.Limit)
+	offset := args.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
 	}
 
-	page, total, next := websearch.SliceContent(query.Content, args.Offset, args.Limit)
 	payload := struct {
 		ResponseID string `json:"responseId"`
-		QueryIndex int    `json:"queryIndex"`
-		Query      string `json:"query"`
+		Kind       string `json:"kind"`
+		IndexParam string `json:"indexParam"`
+		Index      int    `json:"index"`
+		Query      string `json:"query,omitempty"`
+		URL        string `json:"url,omitempty"`
+		Title      string `json:"title,omitempty"`
 		Provider   string `json:"provider,omitempty"`
-		SearchErr  string `json:"searchError,omitempty"`
-		Hits       int    `json:"hits"`
+		SearchErr  string `json:"error,omitempty"`
+		Hits       int    `json:"hits,omitempty"`
 		Offset     int    `json:"offset"`
 		Total      int    `json:"total"`
 		NextOffset int    `json:"nextOffset"`
 		Content    string `json:"content"`
 	}{
 		ResponseID: id,
-		QueryIndex: index,
-		Query:      query.Query,
-		Provider:   query.Provider,
-		SearchErr:  query.Error,
-		Hits:       len(query.Results),
-		Offset:     args.Offset,
+		Kind:       target.kind,
+		IndexParam: target.indexParam,
+		Index:      target.index,
+		Provider:   target.provider,
+		SearchErr:  target.searchErr,
+		Hits:       target.hits,
+		Offset:     offset,
 		Total:      total,
 		NextOffset: next,
 		Content:    page,
 	}
-	if payload.Offset < 0 {
-		payload.Offset = 0
+	if target.kind == websearch.KindFetch {
+		payload.URL = target.label
+		payload.Title = target.title
+	} else {
+		payload.Query = target.label
 	}
+
+	encoded, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("get_search_content: encode result: %w", err)
+	}
+	return string(encoded), nil
+}
+
+// readPassages answers with findText passages.
+func (t *GetSearchContentTool) readPassages(id string, target contentTarget, terms []string, args getSearchContentInput) (string, error) {
+	mode, err := websearch.ParseFindMode(args.FindMode)
+	if err != nil {
+		return "", err
+	}
+	budget := args.Limit
+	if budget <= 0 || budget > websearch.MaxPageRunes {
+		budget = websearch.MaxPageRunes
+	}
+	found := websearch.Find(target.content, terms, mode, budget)
+
+	payload := struct {
+		ResponseID string `json:"responseId"`
+		Kind       string `json:"kind"`
+		IndexParam string `json:"indexParam"`
+		Index      int    `json:"index"`
+		Query      string `json:"query,omitempty"`
+		URL        string `json:"url,omitempty"`
+		Title      string `json:"title,omitempty"`
+		Mode       string `json:"mode"`
+		websearch.FindResult
+	}{
+		ResponseID: id,
+		Kind:       target.kind,
+		IndexParam: target.indexParam,
+		Index:      target.index,
+		Mode:       string(mode),
+		FindResult: found,
+	}
+	if target.kind == websearch.KindFetch {
+		payload.URL = target.label
+		payload.Title = target.title
+	} else {
+		payload.Query = target.label
+	}
+
 	encoded, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("get_search_content: encode result: %w", err)

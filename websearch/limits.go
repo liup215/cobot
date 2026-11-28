@@ -48,8 +48,25 @@ const (
 	// MaxFindPassages bounds how many passages one findText call returns.
 	MaxFindPassages = 20
 
-	// DefaultTimeout is the per-request HTTP timeout.
+	// DefaultTimeout is the per-request HTTP timeout for SEARCH providers.
 	DefaultTimeout = 20 * time.Second
+
+	// FetchTimeout is the whole-request timeout for one fetched page. Slightly
+	// longer than search: a PDF is bigger and slower than a JSON result list, and
+	// timing out at 20s on a 3MB syllabus download wastes the work.
+	FetchTimeout = 25 * time.Second
+
+	// MaxFetchBytes bounds one downloaded body. 5MB covers a past-paper PDF and is
+	// small enough that a mis-aimed URL cannot pull a disk image into memory.
+	MaxFetchBytes int64 = 5 << 20
+
+	// MaxStoredTextRunes caps one extracted document. A model reading 200k runes is
+	// reading nothing useful; the cap also keeps the store's budget meaningful.
+	MaxStoredTextRunes = 200_000
+
+	// ExcerptRunes is how much of a fetched page the tool returns inline. The rest
+	// is deliberately left to get_search_content.
+	ExcerptRunes = 4_000
 
 	// maxRetryWait is the longest Retry-After the client will sleep through.
 	// A longer cooldown moves the query to the next provider instead — parking
@@ -72,6 +89,8 @@ const (
 	StoreRunes = 4_000_000
 )
 
-// KindSearch tags a store entry as a search result set (fetch results will use
-// a different kind and a different prefix).
+// KindSearch tags a store entry as a search result set.
 const KindSearch = "search"
+
+// KindFetch tags a store entry as a set of fetched pages (responseId prefix "f_").
+const KindFetch = "fetch"

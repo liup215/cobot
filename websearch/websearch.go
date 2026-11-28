@@ -43,6 +43,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -64,11 +65,18 @@ type Client struct {
 	providers []Provider
 	store     *Store
 
-	maxQueries   int
-	maxResults   int
-	snippetRunes int
-	budgetRunes  int
-	concurrency  int
+	maxQueries        int
+	maxResults        int
+	snippetRunes      int
+	budgetRunes       int
+	concurrency       int
+	fetchExcerptRunes int
+
+	// guard + fetchHTTP are the fetch_content path: a private-network gate and
+	// the client that enforces it. Built once, in NewClient, so every fetch shares
+	// the same policy (and the same connection pool).
+	guard     FetchGuardOptions
+	fetchHTTP *http.Client
 }
 
 // ClientOption configures a Client.
@@ -91,23 +99,40 @@ func WithProviders(p ...Provider) ClientOption {
 	}
 }
 
+// WithFetchGuard tunes the private-address gate used by fetch_content. The zero
+// value blocks loopback and every private range; AllowLoopback exists for tests
+// and self-hosted setups.
+func WithFetchGuard(opts FetchGuardOptions) ClientOption {
+	return func(c *Client) {
+		c.guard = opts
+	}
+}
+
 // NewClient builds a client. With no options it mirrors Default: Exa first
 // (zero key), Tavily behind it when a key is present.
 func NewClient(opts ...ClientOption) *Client {
 	c := &Client{
-		providers:    defaultProviders(),
-		store:        NewStore(),
-		maxQueries:   MaxQueries,
-		maxResults:   MaxNumResults,
-		snippetRunes: SnippetRunes,
-		budgetRunes:  BudgetRunes,
-		concurrency:  MaxConcurrency,
+		providers:         defaultProviders(),
+		store:             NewStore(),
+		maxQueries:        MaxQueries,
+		maxResults:        MaxNumResults,
+		snippetRunes:      SnippetRunes,
+		budgetRunes:       BudgetRunes,
+		concurrency:       MaxConcurrency,
+		fetchExcerptRunes: ExcerptRunes,
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
+	// After the options: the guard they may have changed decides the client's
+	// dialer policy, and rebuilding it later would leave an unguarded client
+	// reachable from a goroutine.
+	c.fetchHTTP = newFetchHTTPClient(c.guard, FetchTimeout, false)
 	return c
 }
+
+// fetchClient is the guarded HTTP client used by fetch_content.
+func (c *Client) fetchClient() *http.Client { return c.fetchHTTP }
 
 // Store exposes the result store so the get_search_content tool can read what
 // a previous search wrote.
@@ -347,6 +372,7 @@ func hint(id string, droppedByNumResults, droppedByBudget, queryCount int) strin
 	b.WriteString(")")
 	fmt.Fprintf(&b, `. Read more with get_search_content({"responseId": %q, "queryIndex": 0, "limit": %d})`, id, DefaultPageRunes)
 	b.WriteString(" — it returns the complete provider text for a query in pages, and findText locates passages without paging.")
+	b.WriteString(" Snippets here are provider excerpts, NOT the page: to read a source in full, call fetch_content with its URL.")
 	return b.String()
 }
 
