@@ -134,3 +134,80 @@ func TestLiveFetchContent(t *testing.T) {
 		t.Errorf("metadata endpoint was not refused: %+v", blocked.URLs[0])
 	}
 }
+
+// TestLiveSourceCheck runs source_check against the real web: search, fetch the top
+// sources, quote sentences from the page, and refuse to judge.
+//
+//	COBOT_WEB_LIVE=1 go test ./websearch/ -run Live -v
+func TestLiveSourceCheck(t *testing.T) {
+	if os.Getenv("COBOT_WEB_LIVE") == "" {
+		t.Skip("set COBOT_WEB_LIVE=1 to exercise the live evidence pipeline")
+	}
+
+	client := NewClient(WithProviders(NewExaProvider()), WithStore(NewStore()))
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	artifact, err := client.SourceCheck(ctx, SourceCheckRequest{
+		Claim:   "Cambridge International AS & A Level Biology 9700 is examined from 2025 to 2027",
+		Queries: []string{"Cambridge 9700 Biology syllabus 2025-2027", "9700 syllabus update 2028-2030"},
+	})
+	if err != nil {
+		t.Fatalf("source_check: %v", err)
+	}
+	t.Logf("status=%s sources=%d passages=%d (total %d) id=%s", artifact.Status, len(artifact.Sources), len(artifact.Passages), artifact.TotalPassages, artifact.ResponseID)
+
+	if artifact.Status != StatusUnclear && artifact.Status != StatusMissingEvidence {
+		t.Fatalf("status = %q", artifact.Status)
+	}
+	if len(artifact.Sources) == 0 {
+		t.Fatalf("no sources: %+v", artifact)
+	}
+	if artifact.Status == StatusUnclear && len(artifact.Passages) == 0 {
+		t.Fatalf("unclear with no passages")
+	}
+
+	pagePassages := 0
+	for _, passage := range artifact.Passages {
+		if passage.Origin == OriginPage {
+			pagePassages++
+		}
+	}
+	t.Logf("page passages: %d of %d inline", pagePassages, len(artifact.Passages))
+
+	// Whatever the ranking produced, the offsets must locate the text in the stored
+	// page — that is what makes the citation usable.
+	entry, err := client.Store().Get(artifact.ResponseID)
+	if err != nil {
+		t.Fatalf("artifact store: %v", err)
+	}
+	if len(entry.URLs) == 0 {
+		t.Fatalf("no page text stored, so no offset can be opened")
+	}
+	verified := 0
+	for _, passage := range artifact.Passages {
+		if passage.Origin != OriginPage || passage.Truncated {
+			continue
+		}
+		var content string
+		for _, doc := range entry.URLs {
+			if doc.URL == passage.URL {
+				content = doc.Content
+			}
+		}
+		if content == "" {
+			t.Errorf("page for passage %s was not stored (%s)", passage.ID, passage.URL)
+			continue
+		}
+		runes := []rune(content)
+		if passage.End > len(runes) {
+			t.Errorf("passage %s end %d > page %d runes", passage.ID, passage.End, len(runes))
+			continue
+		}
+		if got := strings.TrimSpace(string(runes[passage.Start:passage.End])); got != passage.Text {
+			t.Errorf("offset %d..%d reads %q, passage says %q", passage.Start, passage.End, got, passage.Text)
+		}
+		verified++
+	}
+	t.Logf("verified %d page-passage offsets", verified)
+}

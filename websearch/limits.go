@@ -94,3 +94,7 @@ const KindSearch = "search"
 
 // KindFetch tags a store entry as a set of fetched pages (responseId prefix "f_").
 const KindFetch = "fetch"
+
+// KindResearch tags a store entry holding a source_check artifact (the complete,
+// unbounded evidence set as JSON; responseId prefix "r_").
+const KindResearch = "research"

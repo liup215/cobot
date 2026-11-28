@@ -120,7 +120,12 @@ func (s *Store) Put(kind string, queries []StoredQuery) string {
 	stored := make([]StoredQuery, len(queries))
 	runes := 0
 	for i, q := range queries {
-		q.Content = flatten(q)
+		// A caller that brought its own text keeps it: source_check stores a JSON
+		// artifact whose bytes ARE the content, and flattening from Results (which it
+		// has none of) would silently blank the stored evidence.
+		if q.Content == "" {
+			q.Content = flatten(q)
+		}
 		runes += utf8RuneCount(q.Content)
 		stored[i] = q
 	}
@@ -137,6 +142,26 @@ func (s *Store) PutFetch(urls []StoredURL) string {
 		stored[i] = u
 	}
 	return s.insert(&Entry{Kind: KindFetch, URLs: stored, runes: runes})
+}
+
+// PutResearch stores a source_check artifact AND the pages its passages quote.
+//
+// Both, not just the artifact: every page passage carries a rune offset into the page
+// text, so those offsets are only meaningful if a reader can open that text. Storing
+// the artifact alone would leave a citation that points at nothing.
+func (s *Store) PutResearch(claim, artifactJSON string, docs []StoredURL) string {
+	queries := []StoredQuery{{Query: claim, Content: artifactJSON}}
+	storedDocs := make([]StoredURL, 0, len(docs))
+	runes := utf8RuneCount(artifactJSON)
+	for _, doc := range docs {
+		doc.Content = strings.TrimSpace(doc.Content)
+		if doc.Content == "" {
+			continue
+		}
+		storedDocs = append(storedDocs, doc)
+		runes += utf8RuneCount(doc.Content)
+	}
+	return s.insert(&Entry{Kind: KindResearch, Queries: queries, URLs: storedDocs, runes: runes})
 }
 
 // insert assigns the id, stamps the time and evicts to fit the caps.

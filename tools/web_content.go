@@ -170,12 +170,20 @@ func (t *GetSearchContentTool) Execute(_ context.Context, input json.RawMessage)
 // resolveTarget picks the stored entry this call reads, refusing the wrong
 // selector loudly: silently falling back to index 0 would return a different
 // source than the caller asked for.
+//
+// The rule is by DATA, not by tool: a URL selector reads a stored page when the
+// entry holds pages (fetch_content, and source_check, which stores the pages its
+// citations point into); a query selector reads the stored text when it holds a
+// query or a claim (web_search, and source_check's artifact JSON).
 func resolveTarget(entry *websearch.Entry, args getSearchContentInput) (contentTarget, error) {
-	switch entry.Kind {
-	case websearch.KindFetch:
-		if args.QueryIndex != nil {
-			return contentTarget{}, fmt.Errorf("this responseId holds fetched pages, not search results — use urlIndex (or url) instead of queryIndex")
+	if args.URLIndex != nil || strings.TrimSpace(args.URL) != "" {
+		if len(entry.URLs) == 0 {
+			if entry.Kind == websearch.KindSearch {
+				return contentTarget{}, fmt.Errorf("this responseId holds search results, not fetched pages — use queryIndex (or query) instead of urlIndex")
+			}
+			return contentTarget{}, fmt.Errorf("this %s response stored no page text (it ran without fetching) — use queryIndex to read what it did store, or re-run it with fetching enabled", entry.Kind)
 		}
+
 		index := 0
 		if args.URLIndex != nil {
 			index = *args.URLIndex
@@ -209,42 +217,45 @@ func resolveTarget(entry *websearch.Entry, args getSearchContentInput) (contentT
 			hits:       1,
 			indexParam: "urlIndex",
 		}, nil
-
-	default:
-		if args.URLIndex != nil || strings.TrimSpace(args.URL) != "" {
-			return contentTarget{}, fmt.Errorf("this responseId holds search results, not fetched pages — use queryIndex (or query) instead of urlIndex")
-		}
-		index := 0
-		if args.QueryIndex != nil {
-			index = *args.QueryIndex
-		}
-		if wanted := strings.TrimSpace(args.Query); wanted != "" {
-			index = -1
-			for i, query := range entry.Queries {
-				if strings.EqualFold(query.Query, wanted) {
-					index = i
-					break
-				}
-			}
-			if index < 0 {
-				return contentTarget{}, fmt.Errorf("query not found in this response: %s (it holds %d quer%s; omit query to read the first)", wanted, len(entry.Queries), plural(len(entry.Queries)))
-			}
-		}
-		if index < 0 || index >= len(entry.Queries) {
-			return contentTarget{}, fmt.Errorf("queryIndex %d out of range: %d quer%s stored", index, len(entry.Queries), plural(len(entry.Queries)))
-		}
-		query := entry.Queries[index]
-		return contentTarget{
-			kind:       entry.Kind,
-			index:      index,
-			label:      query.Query,
-			provider:   query.Provider,
-			searchErr:  query.Error,
-			content:    query.Content,
-			hits:       len(query.Results),
-			indexParam: "queryIndex",
-		}, nil
 	}
+
+	if len(entry.Queries) == 0 {
+		if len(entry.URLs) > 0 {
+			return contentTarget{}, fmt.Errorf("this responseId holds fetched pages, not search results — use urlIndex (or url) instead of queryIndex")
+		}
+		return contentTarget{}, fmt.Errorf("this response stored no paged text")
+	}
+
+	index := 0
+	if args.QueryIndex != nil {
+		index = *args.QueryIndex
+	}
+	if wanted := strings.TrimSpace(args.Query); wanted != "" {
+		index = -1
+		for i, query := range entry.Queries {
+			if strings.EqualFold(query.Query, wanted) {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			return contentTarget{}, fmt.Errorf("query not found in this response: %s (it holds %d quer%s; omit query to read the first)", wanted, len(entry.Queries), plural(len(entry.Queries)))
+		}
+	}
+	if index < 0 || index >= len(entry.Queries) {
+		return contentTarget{}, fmt.Errorf("queryIndex %d out of range: %d quer%s stored", index, len(entry.Queries), plural(len(entry.Queries)))
+	}
+	query := entry.Queries[index]
+	return contentTarget{
+		kind:       entry.Kind,
+		index:      index,
+		label:      query.Query,
+		provider:   query.Provider,
+		searchErr:  query.Error,
+		content:    query.Content,
+		hits:       len(query.Results),
+		indexParam: "queryIndex",
+	}, nil
 }
 
 // readPage answers with one page of the stored text.

@@ -230,9 +230,9 @@ func TestWebSearchRequiresAQuery(t *testing.T) {
 	}
 }
 
-// TestWebToolsAreRegisteredTogether asserts the triple is in the default registry
-// for BOTH modes: a bounded answer with no reader would be dead weight, and
-// searching/fetching is a legitimate planning action.
+// TestWebToolsAreRegisteredTogether asserts the whole family is in the default
+// registry for BOTH modes: a bounded answer with no reader would be dead weight, and
+// searching/fetching/checking are legitimate planning actions.
 func TestWebToolsAreRegisteredTogether(t *testing.T) {
 	registry := InitDefaultRegistry()
 
@@ -241,7 +241,7 @@ func TestWebToolsAreRegisteredTogether(t *testing.T) {
 		for _, tool := range registry.GetForMode(mode) {
 			names[tool.Name()] = true
 		}
-		for _, want := range []string{"web_search", "fetch_content", "get_search_content"} {
+		for _, want := range []string{"web_search", "fetch_content", "get_search_content", "source_check"} {
 			if !names[want] {
 				t.Errorf("mode %s: %s is not registered", mode, want)
 			}
@@ -277,8 +277,13 @@ func TestWebSearchSchemaDocumentsTheCaps(t *testing.T) {
 
 type contentPayload struct {
 	ResponseID string `json:"responseId"`
+	Kind       string `json:"kind"`
+	IndexParam string `json:"indexParam"`
+	Index      int    `json:"index"`
 	QueryIndex int    `json:"queryIndex"`
 	Query      string `json:"query"`
+	URL        string `json:"url"`
+	Title      string `json:"title"`
 	Offset     int    `json:"offset"`
 	Total      int    `json:"total"`
 	NextOffset int    `json:"nextOffset"`

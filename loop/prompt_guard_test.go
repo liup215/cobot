@@ -39,6 +39,9 @@ var nonToolIdentifiers = map[string]bool{
 	"line_number":         true, // input-schema property (read paging)
 	"tool_calls":          true, // prose: native function-calling field
 	"tool_name":           true, // XML fallback placeholder tag <tool_name>
+	// source_check output VALUES quoted in its description (passage origins). They are
+	// literal enum strings a model must recognise, not tools.
+	"provider_summary": true,
 }
 
 // loopToolDescs mirrors the tool-description building RunWithCallback performs

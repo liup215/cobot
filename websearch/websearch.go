@@ -236,6 +236,31 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse
 		return nil, err
 	}
 
+	outcomes, err := c.searchOutcomes(ctx, queries, chain)
+	if err != nil {
+		return nil, err
+	}
+
+	// numResults is enforced ONCE, before storing and bounding: two separate
+	// clamps drifted apart (the store kept 2 hits while the inline answer showed
+	// 5) and the model then read a "capped" answer that was not capped.
+	outcomes, dropped := capResults(queries, outcomes)
+	id := c.storeSearch(queries, outcomes)
+	bounded, omittedInline := c.bound(outcomes)
+
+	return &SearchResponse{
+		ResponseID:     id,
+		Providers:      usedProviders(bounded),
+		Queries:        bounded,
+		OmittedResults: omittedInline,
+		Hint:           hint(id, dropped, omittedInline, len(bounded)),
+	}, nil
+}
+
+// searchOutcomes runs every query down the chain, up to concurrency at a time,
+// and returns per-query outcomes in request order. Both web_search and source_check
+// use it, so the fan-out rules (isolation, cancellation, retry) exist once.
+func (c *Client) searchOutcomes(ctx context.Context, queries []Query, chain []Provider) ([]QueryOutcome, error) {
 	outcomes := make([]QueryOutcome, len(queries))
 	sem := make(chan struct{}, c.concurrency)
 	var wg sync.WaitGroup
@@ -255,26 +280,12 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse
 	}
 	wg.Wait()
 
-	// Context cancellation is a real failure, not a partial answer: report it
-	// as an error so the host can surface "stopped" instead of empty results.
+	// Context cancellation is a real failure, not a partial answer: report it as an
+	// error so the host can surface "stopped" instead of empty results.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-
-	// numResults is enforced ONCE, before storing and bounding: two separate
-	// clamps drifted apart (the store kept 2 hits while the inline answer showed
-	// 5) and the model then read a "capped" answer that was not capped.
-	outcomes, dropped := capResults(queries, outcomes)
-	id := c.storeSearch(queries, outcomes)
-	bounded, omittedInline := c.bound(outcomes)
-
-	return &SearchResponse{
-		ResponseID:     id,
-		Providers:      usedProviders(bounded),
-		Queries:        bounded,
-		OmittedResults: omittedInline,
-		Hint:           hint(id, dropped, omittedInline, len(bounded)),
-	}, nil
+	return outcomes, nil
 }
 
 // capResults trims each query to its numResults and reports how many hits were
